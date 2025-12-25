@@ -18,26 +18,24 @@ sub new {
         _credentials    => $params{credentials},
         _ranges         => $params{ranges},
         _snmpwalk       => $params{file},
-        _netscan        => $params{netscan} // 0,
-        _control        => $params{showcontrol} // 0,
-        _localtask      => $params{localtask} // 0,
+        _server         => $params{server},
     };
     bless $self, $class;
 }
 
 sub pid {
     my ($self) = @_;
-    return $self->{_params}->{PID} || 0;
+    return $self->{_params}->{PID} // $self->{_params}->{pid} // 0;
 }
 
 sub timeout {
     my ($self) = @_;
-    return $self->{_params}->{TIMEOUT} || 60;
+    return $self->{_params}->{TIMEOUT} // $self->{_params}->{timeout} // 60;
 }
 
 sub max_threads {
     my ($self) = @_;
-    return $self->{_params}->{THREADS_DISCOVERY} || 1;
+    return $self->{_params}->{THREADS_DISCOVERY} // $self->{_params}->{threads} // 1;
 }
 
 sub netscan {
@@ -177,13 +175,12 @@ sub ranges {
     my @ranges = ();
 
     foreach my $range (@{$self->{_ranges}}) {
-        my $thisrange = {
-            name    => $range->{NAME} // "",
-            ports   => _getSNMPPorts($range->{PORT}),
-            domains => _getSNMPProtocols($range->{PROTOCOL}),
-            entity  => $range->{ENTITY},
-            start   => $range->{IPSTART},
-            end     => $range->{IPEND},
+        push @ranges, {
+            ports   => _getSNMPPorts($range->{PORT} // $range->{port}),
+            domains => _getSNMPProtocols($range->{PROTOCOL} // $range->{protocol}),
+            entity  => $range->{ENTITY} // $range->{entity},
+            start   => $range->{IPSTART} // $range->{start},
+            end     => $range->{IPEND} // $range->{end},
             walk    => $self->{_snmpwalk},
         };
         # Support ToolBox model where credentials are linked to range
@@ -198,7 +195,69 @@ sub ranges {
     return @ranges;
 }
 
-sub snmp_credentials {
+sub getCredentialsFromGLPI {
+    my ($self, %params) = @_;
+
+    my $logger = $self->{logger};
+    my $jobid  = $self->pid();
+
+    GLPI::Agent::Protocol::GetParams->require();
+    if ($EVAL_ERROR) {
+        $logger->error("Unable to request SNMP credentials");
+        return;
+    }
+    my $getparams = GLPI::Agent::Protocol::GetParams->new(
+        deviceid    => $params{deviceid},
+        params_id   => $jobid,
+        use         => $self->{_server}.'_netdiscovery',
+    );
+    my $answer = $params{client}->send(
+        url     => $params{url},
+        message => $getparams
+    );
+
+    if ($answer) {
+        my $status = $answer->get('status');
+        my $credentials = $answer->get('credentials');
+        if ($status eq 'ok' && $credentials) {
+            if (@{$credentials}) {
+                foreach my $credential (@{$credentials}) {
+                    next unless ref($credential) eq 'HASH';
+                    my $cred = {
+                        ID      => $credential->{id},
+                        VERSION => $credential->{version},
+                    };
+                    if (!defined($cred->{VERSION})) {
+                        $logger->debug("SNMP credential without version received for jobid $jobid, assuming v1");
+                        $cred->{VERSION} = '1';
+                    }
+                    if ($cred->{VERSION} eq '3') {
+                        map {
+                            $cred->{uc($_)} = $credential->{$_}
+                        } grep { $credential->{$_} }
+                            qw/username authpassword authprotocol privpassword privprotocol/;
+                    } else {
+                        $cred->{COMMUNITY} = $credential->{community} // 'public';
+                    }
+                    push @{$self->{_credentials}}, $cred;
+                }
+            } else {
+                $logger->debug("No SNMP credential returned for jobid $jobid");
+            }
+        } elsif ($status eq 'error') {
+            my $message = $answer->get('message') // 'no error given';
+            $logger->debug("SNMP credential request error: $message");
+        } else {
+            $logger->error("Unsupported SNMP credentials request answer");
+        }
+    } else {
+        $logger->error("Got no SNMP credentials for jobid $jobid");
+    }
+
+    return $self->getValidCredentials();
+}
+
+sub getValidCredentials {
     my ($self) = @_;
 
     return unless $self->{_queue};
@@ -209,74 +268,30 @@ sub snmp_credentials {
 sub remote_credentials {
     my ($self) = @_;
 
-    return unless $self->{_queue};
-
-    return $self->{_queue}->{remote_credentials};
-}
-
-sub _getValidCredentials {
-    my ($self, $name) = @_;
-
-    my @snmp_credentials = ();
-    my @remote_credentials = ();
-
-    # Support ToolBox model where credentials are linked to range
-    return if $name && ref($self->{_credentials}) ne 'HASH';
-    return if !$name && ref($self->{_credentials}) eq 'HASH';
-
-    my $credentials = $name ? $self->{_credentials}->{$name} : $self->{_credentials};
-
-    my ($snmp, $valid_snmp, $invalid_snmp, $remote, $valid_remote, $invalid_remote) = (0, 0, 0, 0, 0, 0);
-    foreach my $credential (@{$credentials}) {
-        next if $credential->{TYPE} && $credential->{TYPE} !~ /^snmp|esx|ssh|winrm$/;
-        # Support no credentials type as legacy snmp credentials
-        if (!$credential->{TYPE} || $credential->{TYPE} eq 'snmp') {
-            $snmp++;
-            if ($credential->{VERSION} eq '3') {
-                # a user name is required
-                unless ($credential->{USERNAME}) {
-                    $self->{logger}->warning("No username defined for a SNMPv3 credential")
-                        unless $invalid_snmp++;
-                    $invalid_snmp++;
-                    next;
-                }
-                # DES support is required
-                unless (Crypt::DES->require()) {
-                    $self->{logger}->warning("Crypt::DES perl module required for SNMPv3 credentials")
-                        unless $invalid_snmp++;
-                    $invalid_snmp++;
-                    next;
-                }
-            } elsif (!$credential->{COMMUNITY}) {
-                $self->{logger}->warning("No community defined for a credential")
-                    unless $invalid_snmp++;
-                $invalid_snmp++;
-                next;
-            }
-            $valid_snmp++;
-            push @snmp_credentials, $credential;
+    foreach my $credential (@{$self->{_credentials}}) {
+        my $snmpv3 = defined($credential->{VERSION}) && $credential->{VERSION} eq '3' ? 1 : 0;
+        if ($snmpv3 && !defined($credential->{USERNAME})) {
+            # a user name is required for snmp v3
+            $self->{logger}->info(
+                "Not username provided".
+                (defined($credential->{ID}) ? " with credentials ID $credential->{ID}":"").
+                ", skipping"
+            );
+        } elsif ($snmpv3 && !Crypt::DES->require()) {
+            # DES support is required for snmp v3
+            $self->{logger}->info(
+                "Crypt::DES perl module is missing to support SNMP v3".
+                (defined($credential->{ID}) ? " for credentials ID $credential->{ID}":"").
+                ", skipping"
+            );
+        } elsif (!defined($credential->{COMMUNITY})) {
+            $self->{logger}->info(
+                "Not community provided".
+                (defined($credential->{ID}) ? " with credentials ID $credential->{ID}":"").
+                ", skipping"
+            );
         } else {
-            $remote++;
-            unless (defined($credential->{USERNAME}) && length($credential->{USERNAME})) {
-                $self->{logger}->warning("No username defined for a $credential->{TYPE} credential")
-                    unless $invalid_remote++;
-                $invalid_remote++;
-                next;
-            }
-            if ($credential->{TYPE} =~ /^esx|winrm$/ && (!defined($credential->{PASSWORD}) || !length($credential->{PASSWORD}))) {
-                $self->{logger}->warning("No password defined for a $credential->{TYPE} credential")
-                    unless $invalid_remote++;
-                $invalid_remote++;
-                next;
-            }
-            if ($credential->{TYPE} =~ /^ssh|winrm$/ && defined($credential->{PORT}) && ($credential->{PORT} !~ /^\d+$/ || ($credential->{PORT} < 0 || $credential->{PORT} > 65535))) {
-                $self->{logger}->warning("Not valid port defined for a $credential->{TYPE} credential")
-                    unless $invalid_remote++;
-                $invalid_remote++;
-                next;
-            }
-            $valid_remote++;
-            push @remote_credentials, $credential;
+            push @credentials, $credential;
         }
     }
 
