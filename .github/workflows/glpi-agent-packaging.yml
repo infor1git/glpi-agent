@@ -799,8 +799,7 @@ jobs:
 
     runs-on: ubuntu-latest
 
-    if: ${{ needs.setup-release.outputs.create-release == 'yes' }}
-    needs: [ setup-release, windows-packaging, macosx-packaging, linux-snap-packaging, linux-debian-packaging, linux-rpm-packaging, linux-installer, sources ]
+    if: ${{ needs.setup-release.outputs.tag_name }}
 
     steps:
     - uses: actions/checkout@v4
