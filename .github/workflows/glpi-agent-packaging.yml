@@ -162,7 +162,8 @@ jobs:
     - name: Create Tagged Release
       id: create-tagged-release
       uses: ncipollo/release-action@v1
-if: ${{ steps.set-version.outputs.create-release == 'yes' }}      env:
+      if: ${{ steps.set-version.outputs.create-release == 'yes' }}
+      env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # This token is provided by Actions, you do not need to create your own token
       with:
         tag: ${{ steps.set-version.outputs.tag_name }}
@@ -798,7 +799,8 @@ if: ${{ steps.set-version.outputs.create-release == 'yes' }}      env:
 
     runs-on: ubuntu-latest
 
-    if: ${{ needs.setup-release.outputs.tag_name }}
+    if: ${{ needs.setup-release.outputs.create-release == 'yes' }}
+    needs: [ setup-release, windows-packaging, macosx-packaging, linux-snap-packaging, linux-debian-packaging, linux-rpm-packaging, linux-installer, sources ]
 
     steps:
     - uses: actions/checkout@v4
