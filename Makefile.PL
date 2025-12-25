@@ -9,12 +9,12 @@ use inc::Module::Install;
 use English qw(-no_match_vars);
 use lib::GLPI::Agent::Version;
 
-name 'Glpi-Perl-Agent';
+name 'GLPI-Agent';
 include 'Module::AutoInstall';
-abstract 'Glpi unified Agent for UNIX, Linux, Windows and MacOSX';
+abstract 'GLPI unified Agent for UNIX, Linux, Windows and MacOSX';
 license 'gpl';
 repository 'https://github.com/glpi-project/glpi-agent';
-version '1.1-dev';
+version '1.7.3';
 perl_version '5.008';
 authors 'Teclib Editions';
 
@@ -30,14 +30,14 @@ requires 'LWP::UserAgent'     => '5.8';
 requires 'Net::IP'            => '0';
 requires 'Text::Template'     => '0';
 requires 'UNIVERSAL::require' => '0';
-requires 'XML::TreePP'        => '0.26';
-requires 'XML::XPath'         => '0';
+requires 'XML::LibXML'        => '0';
 requires 'YAML::Tiny'         => '0';
 requires 'Memoize'            => '0';
 requires 'Time::HiRes'        => '0';
 requires 'Digest::SHA'        => '0';
-requires 'JSON'               => '0';
+requires 'Cpanel::JSON::XS'   => '0';
 requires 'Data::UUID'         => '0';
+requires 'DateTime'           => '0';
 
 if ($OSNAME eq 'MSWin32') {
     requires 'Win32::OLE'         => '0';
@@ -65,7 +65,7 @@ test_requires 'HTTP::Server::Simple::Authen' => '0';
 test_requires 'IO::Socket::SSL'              => '0';
 test_requires 'IO::Capture::Stderr'          => '0';
 test_requires 'IPC::Run'                     => '0';
-test_requires 'JSON::PP'                     => '0';
+test_requires 'Cpanel::JSON::XS'             => '0';
 test_requires 'Net::SNMP'                    => '0';
 test_requires 'LWP::Protocol::https'         => '0';
 test_requires 'Parallel::ForkManager'        => '0';
@@ -79,17 +79,16 @@ test_requires 'Test::NoWarnings'             => '0';
 test_requires 'Test::MockObject'             => '0';
 
 # Inventory
-recommends 'DateTime'                        => '0';
 recommends 'Net::CUPS'                       => 0.60 if $OSNAME ne 'MSWin32';
 recommends 'Parse::EDID'                     => '0';
 
 # Remote Inventory
-recommends 'Data::UUID'                      => '0';
+recommends 'Net::SSH2'                       => '0';
 
 # Deploy
 recommends 'Archive::Extract'             => '0';
 recommends 'File::Copy::Recursive'        => '0';
-recommends 'JSON::PP'                     => '0';
+recommends 'Cpanel::JSON::XS'             => '0';
 recommends 'Net::Ping'                    => '0';
 recommends 'Parallel::ForkManager'        => '0';
 recommends 'URI::Escape'                  => '0';
@@ -126,6 +125,7 @@ makemaker_args(
             t/*/*/*.t
             t/*/*/*/*.t
             t/*/*/*/*/*.t
+            t/*/*/*/*/*/*.t
         )
     },
     INSTALLMAN3DIR => 'none'

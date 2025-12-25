@@ -40,13 +40,27 @@ sub defaults {
         # Supported by class GLPI::Agent::HTTP::Server::Plugin
         maxrate             => 30,
         maxrate_period      => 3600,
+        forbid_not_trusted  => "no",
     };
 }
+
+# Don't publish an url on glpi-agent index page
+sub url {}
 
 sub init {
     my ($self) = @_;
 
     $self->SUPER::init(@_);
+
+    # Don't do more initialization if disabled
+    return if $self->disabled();
+
+    # Check secret is set if plugin is enabled
+    unless ($self->config('token')) {
+        $self->error("Plugin enabled without token in configuration");
+        $self->disable("Plugin disabled on wrong configuration");
+        return;
+    }
 
     $self->{request}  = 'none';
 
@@ -62,13 +76,6 @@ sub init {
         logger     => $self->{logger},
         basevardir => $self->{server}->{agent}->{config}->{vardir},
     ) unless $self->{target};
-
-    # Check secret is set if plugin is enabled
-    if (!$self->disabled() && !$self->config('token')) {
-        $self->error("Plugin enabled without token in configuration");
-        $self->disable();
-        $self->info("Plugin disabled on wrong configuration");
-    }
 
     # Normalize no_compress
     $self->{no_compress} = $self->config('no_compress') !~ /^0|no$/i ? 1 : 0;
@@ -204,15 +211,10 @@ sub handle {
         print $fd $data;
         close $fd;
 
-        my $out = getFileHandle(
+        $data = getAllLines(
             command => 'gzip -c ' . $fd->filename(),
             logger  => $self->{logger}
         );
-        next unless $out;
-
-        local $INPUT_RECORD_SEPARATOR; # Set input to "slurp" mode.
-        $data = <$out>;
-        close $out;
     }
 
     my $response = HTTP::Response->new(

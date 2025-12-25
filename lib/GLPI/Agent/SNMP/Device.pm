@@ -16,8 +16,9 @@ use constant discovery => [ qw(
         SERIAL UPTIME MANUFACTURER CONTACT AUTHSNMP
     )];
 # http://fusioninventory.org/documentation/dev/spec/protocol/netinventory.html
+# STORAGES is specified in inventory.schema.json and can be used to inventory SAN disks
 use constant inventory => [ qw(
-        INFO PORTS MODEMS FIRMWARES SIMCARDS PAGECOUNTERS CARTRIDGES COMPONENTS
+        INFO PORTS MODEMS FIRMWARES SIMCARDS PAGECOUNTERS CARTRIDGES COMPONENTS STORAGES DRIVES
     )];
 
 # common base variables
@@ -76,6 +77,7 @@ sub new {
 
     my $self = {
         snmp   => $snmp,
+        glpi   => $params{glpi} // '', # glpi server version if we need to check feature support
         logger => $logger
     };
 
@@ -101,14 +103,15 @@ sub walk {
 }
 
 sub loadMibSupport {
-    my ($self, $sysobjectid) = @_;
+    my ($self, $sysobjectid, $config) = @_;
 
     # list supported mibs regarding sysORID list as this list permits to
     # identify device supported MIBs
     $self->{MIBSUPPORT} = GLPI::Agent::SNMP::MibSupport->new(
-        sysobjectid  => $sysobjectid,
-        device       => $self,
-        logger       => $self->{logger}
+        sysobjectid => $sysobjectid,
+        device      => $self,
+        config      => $config, # Required for ConfigurationPlugin module
+        logger      => $self->{logger}
     );
 }
 
@@ -398,6 +401,17 @@ sub setMacAddress {
             return $self->{MAC} = $currentMac
                 if ($macs{$currentMac} == $macs{$sortedMac[0]} - 1);
         }
+
+        # Finally try to set mac from the first interface having speed set
+        # On printer with ethernet port & wifi port, speed is not set if wifi is not configured
+        my $ifSpeed = $self->walk(".1.3.6.1.2.1.2.2.1.5");
+        foreach my $index (sort { $a <=> $b } keys(%{$ifSpeed})) {
+            next unless $ifSpeed->{$index};
+            my $currentMac = getCanonicalMacAddress($addresses->{$index})
+                or next;
+            next unless first { $_ eq $currentMac } @valid_mac_addresses;
+            return $self->{MAC} = $currentMac;
+        }
     }
 }
 
@@ -415,7 +429,7 @@ sub setModel {
             $self->get('.1.3.6.1.2.1.25.3.2.1.3.1')    :
             exists $self->{TYPE} && $self->{TYPE} eq 'POWER' ?
             $self->get('.1.3.6.1.2.1.33.1.1.5.0')      : # UPS-MIB
-            $self->get('.1.3.6.1.2.1.47.1.1.1.1.13.1') ;
+            $self->{snmp}->get_first('.1.3.6.1.2.1.47.1.1.1.1.13');
         $self->{MODEL} = getCanonicalString($model) if $model;
     }
 
@@ -426,7 +440,7 @@ sub setModel {
     }
 
     # reset manufacturer by rule as real vendor based on first model word
-    if (exists $self->{MODEL}) {
+    unless (empty($self->{MODEL})) {
         my ($first_word) = $self->{MODEL} =~ /(\S+)/;
         my $result = $sysmodel_first_word{lc($first_word)};
         if ($result && $result->{manufacturer}) {

@@ -22,14 +22,18 @@ if ($OSNAME eq 'MSWin32') {
 # exclude linked modules
 my @files = grep { filter($_) } Test::Compile::all_pm_files('lib');
 
+# On linux, include perl linux installer modules
+if ($OSNAME eq 'linux') {
+    push @INC, 'contrib/unix/installer';
+    push @files, Test::Compile::all_pm_files('contrib/unix/installer');
+}
+
 Test::Compile::all_pm_files_ok(@files);
 
 # filename-based filter
 sub filter {
 
     if (!$Config{usethreads} || $Config{usethreads} ne 'define') {
-        return 0 if $_ =~ m{Agent/Task/NetInventory.pm};
-        return 0 if $_ =~ m{Agent/Task/NetDiscovery.pm};
         return 0 if $_ =~ m{Agent/Tools/Win32.pm};
         return 0 if $_ =~ m{Agent/Daemon/Win32.pm};
         return 0 if $_ =~ m{Agent/Task/Inventory/Win32};

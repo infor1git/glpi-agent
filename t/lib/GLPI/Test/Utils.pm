@@ -13,7 +13,6 @@ use GLPI::Agent::Tools;
 our @EXPORT = qw(
     run_executable
     test_port
-    test_localhost
     mockGetWMIObjects
     mockGetRegistryKey
     unsetProxyEnvVar
@@ -35,11 +34,6 @@ sub test_port {
     }
 
     return 0;
-}
-
-sub test_localhost {
-
-    return inet_aton('localhost');
 }
 
 sub mockGetWMIObjects {
@@ -161,13 +155,14 @@ sub loadRegistryDump {
             next;
         }
 
-        if ($line =~ /^ " ([^"]+) " = dword:(\d+)/x) {
+        if ($line =~ /^ " ([^"]+) " = dword:([0-9a-f]+)/x) {
             my ($key, $value) = ($1, $2);
             $current_key->{'/' . $key} = "0x$value";
             next;
         }
 
-        if ($line =~ /^ " ([^"]+) " = hex:([a-f0-9,]+)/x) {
+        # hex(b) support is for QWORD datas
+        if ($line =~ /^ " ([^"]+) " = hex(?:\(b\))?:([a-f0-9,]+)/x) {
             my ($key, $value) = ($1, $2);
             $current_key->{'/' . $key} = _binary($2);
             $current_variable = '/' . $key if $line =~ /\\$/;
@@ -230,7 +225,6 @@ sub run_executable {
 sub openWin32Registry {
 
     my $Registry;
-    my ($norecursion) = @_;
     Win32::TieRegistry->require();
     Win32::TieRegistry->import(
         Delimiter   => '/',
@@ -239,13 +233,17 @@ sub openWin32Registry {
 
     my $agentKey = 'GLPI-Agent-unittest';
     my $machKey = $Registry->{'LMachine'};
+    die "\nFailed to open HKEY_LOCAL_MACHINE hive, be sure to run this win32 test with Administrator privileges"
+        unless $machKey;
     my $settings  = $machKey->Open('SOFTWARE/' . $agentKey, { 'Delimiter' => '/' });
-    if (! defined($settings)) {
+    unless (defined($settings)) {
+        # Create test key
+        my $softKey = $machKey->Open('SOFTWARE', { 'Delimiter' => '/' });
+        $softKey->{$agentKey} = {};
+
+        $settings = $machKey->Open('SOFTWARE/' . $agentKey, { 'Delimiter' => '/' });
         die "\nFailed to create HKEY_LOCAL_MACHINE/SOFTWARE/$agentKey key, be sure to run this win32 test with Administrator privileges"
-            if $norecursion;
-        $settings = $machKey->Open('SOFTWARE', { 'Delimiter' => '/' });
-        $settings->{$agentKey} = {};
-        $settings = openWin32Registry('no-recursion');
+            unless defined($settings);
     }
 
     return $settings;

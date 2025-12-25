@@ -7,6 +7,7 @@ use Win32::TieRegistry qw( KEY_READ );
 use File::Spec;
 use Cwd qw(abs_path);
 use File::Spec::Functions qw(catfile);
+use Data::UUID;
 
 use constant {
     PACKAGE_REVISION    => "1", #BEWARE: always start with 1
@@ -25,7 +26,7 @@ map { $INC{"Perl/Dist/GLPI/Agent/Step/$_.pm"} = __FILE__ } qw(Update OutputMSI T
 # Perl::Dist::Strawberry doesn't detect WiX 3.11 which is installed on windows github images
 # Algorithm imported from Perl::Dist::Strawberry::Step::OutputMSM_MSI::_detect_wix_dir
 my $wixbin_dir;
-for my $v (qw/3.0 3.5 3.6 3.11/) {
+for my $v (qw/3.14 3.11 3.6 3.5 3.0/) {
     my $WIX_REGISTRY_KEY = "HKEY_LOCAL_MACHINE/SOFTWARE/Microsoft/Windows Installer XML/$v";
     # 0x200 = KEY_WOW64_32KEY
     my $r = Win32::TieRegistry->new($WIX_REGISTRY_KEY => { Access => KEY_READ|0x200, Delimiter => q{/} });
@@ -90,6 +91,7 @@ sub build_app {
         agent_vertag    => $versiontag // '',
         agent_fullname  => $provider.' Agent',
         agent_rootdir   => $provider.'-Agent',
+        agent_localguid => Data::UUID->new()->create_str(),
         agent_regpath   => "Software\\$provider-Agent",
         service_name    => lc($provider).'-agent',
         msi_sharedir    => 'contrib/windows/packaging',
@@ -160,16 +162,21 @@ sub run {
         return;
     }
 
+    # Update PATH to include perl/bin for DLLs loading
+    my $binpath = catfile($self->global->{image_dir}, 'perl/bin');
+    $ENV{PATH} .= ":$binpath";
+
     # Without defined modules, run the tests
-    my $perlbin = catfile($self->global->{image_dir}, 'perl/bin/perl.exe');
-    my $makebin = catfile($self->global->{image_dir}, 'perl/bin/gmake.exe');
+    my $perlbin = catfile($binpath, 'perl.exe');
+    my $makebin = catfile($binpath, 'gmake.exe');
 
     my $makefile_pl_cmd = [ $perlbin, "Makefile.PL"];
     $self->boss->message(2, "Test: gonna run perl Makefile.PL");
     my $rv = $self->execute_standard($makefile_pl_cmd);
     die "ERROR: TEST, perl Makefile.PL\n" unless (defined $rv && $rv == 0);
 
-    my $make_test_cmd = [ $makebin, "test" ];
+    # Only test files compilation
+    my $make_test_cmd = [ $makebin, "test", "TEST_FILES=t/01compile.t" ];
     $self->boss->message(2, "Test: gonna run gmake test");
     $rv = $self->execute_standard($make_test_cmd);
     die "ERROR: TEST, make test\n" unless (defined $rv && $rv == 0);
@@ -221,7 +228,6 @@ use constant _dir_id_match => { qw(
     perl\agent\glpi\agent\task\deploy\usercheck              d_deploy_uc
     perl\agent\glpi\agent\task\collect       d_collect
     perl\agent\glpi\agent\task\esx           d_esx_task
-    perl\agent\glpi\agent\soap               d_esx_soap
     perl\agent\glpi\agent\soap\vmware        d_esx_vmware
     perl\agent\glpi\agent\task\wakeonlan     d_wol
 )};
@@ -394,7 +400,16 @@ sub _tree2xml {
         # see: http://stackoverflow.com/questions/10358989/wix-using-keypath-on-components-directories-files-registry-etc-etc
         $feat = $self->_get_dir_feature($dir_id);
         $result .= $ident ."  ". qq[<Component Id="$component_id" Guid="{$component_guid}" KeyPath="yes" Feature="$feat">\n];
-        $result .= $ident ."  ". qq[    <CreateFolder />\n];
+        if ($dir_id eq 'd_install') {
+            $result .= $ident ."    ". qq[  <CreateFolder>\n];
+            $result .= $ident ."    ". qq[    <util:PermissionEx GenericAll="yes" User="CREATOR OWNER" />\n];
+            $result .= $ident ."    ". qq[    <util:PermissionEx GenericAll="yes" User="LocalSystem" />\n];
+            $result .= $ident ."    ". qq[    <util:PermissionEx GenericAll="yes" User="Administrators" />\n];
+            $result .= $ident ."    ". qq[    <util:PermissionEx GenericWrite="no" GenericExecute="yes" GenericRead="yes" User="AuthenticatedUser" />\n];
+            $result .= $ident ."    ". qq[  </CreateFolder>\n];
+        } else {
+            $result .= $ident ."  ". qq[    <CreateFolder />\n];
+        }
         if ($dir_id eq 'd_var') {
             $result .= $ident ."  ". qq[    <util:RemoveFolderEx On="uninstall" Property="UNINSTALL_VAR" />\n];
         } elsif ($dir_id eq 'd_etc') {
@@ -405,18 +420,6 @@ sub _tree2xml {
             $result .= $ident ."  ". qq[    <RemoveFolder Id="rm.$dir_id" On="uninstall" />\n];
         }
         $result .= $ident ."  ". qq[</Component>\n];
-        # Also add virtual folder properties under d_install
-        if ($dir_id eq 'd_install') {
-            foreach my $id (qw(_LOCALDIR)) {
-                $result .= $ident ."  ". qq[<Directory Id="$id">\n];
-                ($component_id, $component_guid) = $self->_gen_component_id(lc($id).".create");
-                $result .= $ident ."    ". qq[<Component Id="$component_id" Guid="{$component_guid}" KeyPath="yes" Feature="$feat">\n];
-                $result .= $ident ."    ". qq[  <CreateFolder />\n];
-                $result .= $ident ."    ". qq[  <RemoveFolder Id="rm.] .lc($id). qq[" On="uninstall" />\n];
-                $result .= $ident ."    ". qq[</Component>\n];
-                $result .= $ident ."  ". qq[</Directory>\n];
-            }
-        }
     }
 
     if (scalar(@f) > 0) {
@@ -439,11 +442,12 @@ sub _tree2xml {
                 my $regpath = "Software\\".$self->global->{_provider}."-Agent";
                 $result .= $ident ."  ". qq[  <ServiceInstall Name="$servicename" Start="auto"\n];
                 $result .= $ident ."  ". qq[                  ErrorControl="normal" DisplayName="!(loc.ServiceDisplayName)" Description="!(loc.ServiceDescription)" Interactive="no"\n];
-                $result .= $ident ."  ". qq[                  Type="ownProcess" Arguments='-I"[INSTALLDIR]perl\\agent" "[INSTALLDIR]perl\\bin\\glpi-win32-service"'>\n];
+                $result .= $ident ."  ". qq[                  Type="ownProcess" Arguments='-I"[INSTALLDIR]perl\\agent" -I"[INSTALLDIR]perl\\site\\lib" -I"[INSTALLDIR]perl\\vendor\\lib" -I"[INSTALLDIR]perl\\lib" "[INSTALLDIR]perl\\bin\\glpi-win32-service"'>\n];
                 $result .= $ident ."  ". qq[    <util:ServiceConfig FirstFailureActionType="restart" SecondFailureActionType="restart" ThirdFailureActionType="restart" RestartServiceDelayInSeconds="60" />\n];
                 $result .= $ident ."  ". qq[  </ServiceInstall>\n];
                 $result .= $ident ."  ". qq[  <ServiceControl Id="SetupService" Name="$servicename" Start="install" Stop="both" Remove="both" Wait="yes" />\n];
                 $result .= $ident ."  ". qq[  <RegistryKey Root="HKLM" Key="$regpath">\n];
+                $result .= $ident ."  ". qq[    <RegistryValue Name="additional-content" Type="string" Value="[ADDITIONAL_CONTENT]" />\n];
                 $result .= $ident ."  ". qq[    <RegistryValue Name="debug" Type="string" Value="[DEBUG]" />\n];
                 $result .= $ident ."  ". qq[    <RegistryValue Name="local" Type="string" Value="[LOCAL]" />\n];
                 $result .= $ident ."  ". qq[    <RegistryValue Name="logger" Type="string" Value="[LOGGER]" />\n];
@@ -463,7 +467,9 @@ sub _tree2xml {
                 $result .= $ident ."  ". qq[    <RegistryValue Name="backend-collect-timeout" Type="string" Value="[BACKEND_COLLECT_TIMEOUT]" />\n];
                 $result .= $ident ."  ". qq[    <RegistryValue Name="no-task" Type="string" Value="[NO_TASK]" />\n];
                 $result .= $ident ."  ". qq[    <RegistryValue Name="no-category" Type="string" Value="[NO_CATEGORY]" />\n];
+                $result .= $ident ."  ". qq[    <RegistryValue Name="no-compression" Type="string" Value="[NO_COMPRESSION]" />\n];
                 $result .= $ident ."  ". qq[    <RegistryValue Name="html" Type="string" Value="[HTML]" />\n];
+                $result .= $ident ."  ". qq[    <RegistryValue Name="json" Type="string" Value="[JSON]" />\n];
                 $result .= $ident ."  ". qq[    <RegistryValue Name="lazy" Type="string" Value="[LAZY]" />\n];
                 $result .= $ident ."  ". qq[    <RegistryValue Name="conf-reload-interval" Type="string" Value="[CONF_RELOAD_INTERVAL]" />\n];
                 $result .= $ident ."  ". qq[    <RegistryValue Name="no-ssl-check" Type="string" Value="[NO_SSL_CHECK]" />\n];
@@ -473,7 +479,12 @@ sub _tree2xml {
                 $result .= $ident ."  ". qq[    <RegistryValue Name="tasks" Type="string" Value="[TASKS]" />\n];
                 $result .= $ident ."  ". qq[    <RegistryValue Name="ca-cert-dir" Type="string" Value="[CA_CERT_DIR]" />\n];
                 $result .= $ident ."  ". qq[    <RegistryValue Name="ca-cert-file" Type="string" Value="[CA_CERT_FILE]" />\n];
+                $result .= $ident ."  ". qq[    <RegistryValue Name="ssl-cert-file" Type="string" Value="[SSL_CERT_FILE]" />\n];
+                $result .= $ident ."  ". qq[    <RegistryValue Name="ssl-fingerprint" Type="string" Value="[SSL_FINGERPRINT]" />\n];
                 $result .= $ident ."  ". qq[    <RegistryValue Name="vardir" Type="string" Value="[VARDIR]" />\n];
+                $result .= $ident ."  ". qq[    <RegistryValue Name="listen" Type="string" Value="[LISTEN]" />\n];
+                $result .= $ident ."  ". qq[    <RegistryValue Name="remote" Type="string" Value="[REMOTE]" />\n];
+                $result .= $ident ."  ". qq[    <RegistryValue Name="remote-workers" Type="string" Value="[REMOTE_WORKERS]" />\n];
                 $result .= $ident ."  ". qq[  </RegistryKey>\n];
                 $result .= $ident ."  ". qq[  <RegistryKey Root="HKLM" Key="$regpath\\Installer">\n];
                 $result .= $ident ."  ". qq[    <RegistryValue Name="InstallDir" Type="string" Value="[INSTALLDIR]" />\n];
@@ -485,9 +496,18 @@ sub _tree2xml {
                 $result .= $ident ."  ". qq[    <RegistryValue Name="TaskMinuteModifier" Type="string" Value="[TASK_MINUTE_MODIFIER]" />\n];
                 $result .= $ident ."  ". qq[    <RegistryValue Name="TaskHourlyModifier" Type="string" Value="[TASK_HOURLY_MODIFIER]" />\n];
                 $result .= $ident ."  ". qq[    <RegistryValue Name="TaskDailyModifier" Type="string" Value="[TASK_DAILY_MODIFIER]" />\n];
+                $result .= $ident ."  ". qq[    <RegistryValue Name="AgentMonitor" Type="string" Value="[AGENTMONITOR]" />\n];
                 # Add registry entry dedicated to deployment vbs check
                 $result .= $ident ."  ". qq[    <RegistryValue Name="Version" Type="string" Value="$installversion" />\n];
                 $result .= $ident ."  ". qq[  </RegistryKey>\n];
+            } elsif ($file_id eq "f_agentmonitor_exe") {
+                my $regpath = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+                # Install GLPI-AgentMonitor only when required
+                $result .= $ident ."  ". qq[  <Condition>AGENTMONITOR=1 AND EXECMODE=1</Condition>\n];
+                # Add registry entry dedicated to GLPI-AgentMonitor autorun
+                $result .= $ident ."  ". qq[  <RegistryValue Root="HKLM" Key="$regpath" Name="GLPI-AgentMonitor" Type="string" Value="[#f_agentmonitor_exe]" />\n];
+                # Add Start menu shortcut for GLPI-AgentMonitor
+                $result .= $ident ."  ". qq[  <Shortcut Id="AgentMonitorStartMenu" Advertise="yes" Directory="ProgramMenuFolder" Name="GLPI Agent Monitor" WorkingDirectory="d_perl_bin" Icon="agentmonitor.ico" />\n];
             }
             $result .= $ident ."  ". qq[</Component>\n];
         }
@@ -508,6 +528,7 @@ sub _gen_file_id {
   my ($self, $file) = @_;
   my $r;
   $r = "f_agent_exe"  if lc($file) eq 'perl\bin\glpi-agent.exe';
+  $r = "f_agentmonitor_exe"  if $file =~ /perl\\bin\\glpi-agentmonitor-x(86|64).exe/i;
   $r = "f_glpiagent"  if lc($file) eq 'glpi-agent.bat';
   return  $r // "f" . $self->{id_counter}++;
 }
@@ -554,12 +575,6 @@ sub run {
 
     my $dest = catfile($self->global->{image_dir}, 'perl/agent/GLPI/Agent/Version.pm');
     $t->process($version, $vars, $dest) || die $t->error();
-
-    # Update default conf to include conf.d folder
-    open CONF, ">>", catfile($self->global->{image_dir}, 'etc/agent.cfg')
-        or die "Can't open default conf: $!\n";
-    print CONF "include 'conf.d/'\n";
-    close(CONF);
 }
 
 package

@@ -5,9 +5,11 @@ use warnings;
 
 use parent 'GLPI::Agent::HTTP::Client';
 
-use XML::TreePP;
 use HTTP::Request;
 use HTTP::Headers;
+use Encode qw(encode);
+
+use GLPI::Agent::XML;
 
 use GLPI::Agent::SOAP::WsMan::Envelope;
 use GLPI::Agent::SOAP::WsMan::Attribute;
@@ -40,7 +42,7 @@ use GLPI::Agent::SOAP::WsMan::MaxElements;
 use GLPI::Agent::SOAP::WsMan::SelectorSet;
 use GLPI::Agent::SOAP::WsMan::Selector;
 
-my $tpp;
+my $xml;
 my $wsman_debug = $ENV{WSMAN_DEBUG} ? 1 : 0;
 
 sub new {
@@ -49,8 +51,6 @@ sub new {
     my $config = $params{config} // {};
 
     my $self = $class->SUPER::new(
-        timeout         => $config->{timeout},
-        no_ssl_check    => $config->{no_ssl_check},
         ca_cert_dir     => $config->{ca_cert_dir}   || $ENV{'CA_CERT_PATH'},
         ca_cert_file    => $config->{ca_cert_file}  || $ENV{'CA_CERT_FILE'},
         ssl_cert_file   => $config->{ssl_cert_file} || $ENV{'SSL_CERT_FILE'},
@@ -58,17 +58,17 @@ sub new {
     );
 
     $self->{_url} = $params{url};
+    $self->{_lang} = 'en-US';
     $self->{_winrm} = $params{winrm} // 0;
     $self->{_noauth} = $params{user} && $params{password} ? 0 : 1;
 
     bless $self, $class;
 
-    $tpp = XML::TreePP->new() unless $tpp;
-
-    # Don't send XML declaration, everything is in the Content-Type header
-    $tpp->set( xml_decl => '' );
-
-    $tpp->set( first_out => [ 's:Header' ] );
+    $xml = GLPI::Agent::XML->new(
+        first_out   => [ 's:Header' ],
+        no_xml_decl => '',
+        xml_format  => 0,
+    ) unless $xml;
 
     return $self;
 }
@@ -76,7 +76,7 @@ sub new {
 sub abort {
     my ( $self, $message ) = @_;
     $self->lasterror($message);
-    $self->{logger}->debug($message) if $self->{logger};
+    $self->{logger}->debug2($message) if $self->{logger};
     return;
 }
 
@@ -96,17 +96,17 @@ sub debug2 {
 sub _send {
     my ( $self, $envelope, $header ) = @_;
 
-    my $xml = $tpp->write($envelope->get());
+    my $message = $xml->write($envelope->get());
     return $self->abort("Won't send wrong request")
-        unless $xml;
+        unless $message;
 
     my $headers = HTTP::Headers->new(
         'Content-Type'      => 'application/soap+xml;charset=UTF-8',
-        'Content-length'    => length($xml // ''),
+        'Content-length'    => length($message // ''),
         %{$header},
     );
 
-    my $request = HTTP::Request->new( POST => $self->url(), $headers, $xml );
+    my $request = HTTP::Request->new( POST => $self->url(), $headers, $message );
 
     print STDERR "===>\n", $request->as_string, "===>\n" if $wsman_debug;
 
@@ -118,16 +118,16 @@ sub _send {
     print STDERR "<====\n", $response->as_string, "<====\n" if $wsman_debug;
 
     if ( $response->is_success ) {
-        my $tree = $tpp->parse($response->content);
-        return $tree;
+        $xml->string($response->content);
+        return $xml->dump_as_hash();
     } elsif ($response->header('Content-Type') && $response->header('Content-Type') =~ m{application/soap\+xml}) {
         # In case of failure (error 500) we can analyse the reason and log it
-        my $tree = $tpp->parse($response->content);
-        my $envelope = Envelope->new($tree);
+        $xml->string($response->content);
+        my $envelope = Envelope->new($xml->dump_as_hash());
         if ($envelope->header->action->is("fault")) {
             my $code = $envelope->body->fault->errorCode;
-            return $self->abort("WMI resource not available") if $code && $code eq '2150858752';
-            $self->debug2("Raw client xml request: ".$xml);
+            return $self->abort("WMI ".($self->{_resource_class} ? $self->{_resource_class}." " : "")."resource not available") if $code && $code eq '2150858752';
+            $self->debug2("Raw client xml request: ".$message);
             $self->debug2("Raw server xml answer: ".$response->content);
             my $text = $envelope->body->fault->reason->text;
             return $self->abort($text || $response->status_line);
@@ -167,6 +167,13 @@ sub identify {
 
     $self->debug2("Identify response: ".$identify->ProductVendor." - ".$identify->ProductVersion);
 
+    # Get remote lang as default lang for future exchanges
+    my $lang = $envelope->attribute('xml:lang');
+    if ($lang) {
+        $self->{_lang} = $lang;
+        $self->debug2("Identify response language: ".$lang);
+    }
+
     return $identify;
 }
 
@@ -175,6 +182,7 @@ sub enumerate {
 
     my @items;
     my $class = $params{query} ? '*' : $params{class};
+    $self->{_resource_class} = $class unless $class eq '*';
     my $url = $self->resource_url($class, $params{moniker});
 
     my $messageid = MessageID->new();
@@ -186,7 +194,7 @@ sub enumerate {
             Enumerate->new(
                 OptimizeEnumeration->new(),
                 MaxElements->new(32000),
-                Filter->new($params{query}),
+                Filter->new(encode('UTF-8',$params{query})),
             )
         );
     } else {
@@ -209,8 +217,8 @@ sub enumerate {
             $action,
             $messageid,
             MaxEnvelopeSize->new(512000),
-            Locale->new("en-US"),
-            DataLocale->new("en-US"),
+            Locale->new($self->{_lang}),
+            DataLocale->new($self->{_lang}),
             $sid,
             $operationid,
             SequenceId->new(),
@@ -278,7 +286,7 @@ sub enumerate {
                     moniker     => $params{moniker},
                     method      => $params{method},
                     selectorset => [ "$params{selector}=$selectorvalue" ],
-                    params      => $params{params},
+                    params      => [ @{$params{params}} ],
                     binds       => $params{binds},
                 );
                 push @items, $params{properties} ? _extract($result, $params{properties}) : $result;
@@ -310,6 +318,9 @@ sub enumerate {
     # Send End to remote
     $self->end($operationid);
 
+    # Forget what resource was requested
+    delete $self->{_resource_class};
+
     return @items;
 }
 
@@ -321,7 +332,17 @@ sub _extract {
     my $hash = {};
 
     foreach my $property (@{$properties}) {
-        $hash->{$property} = $item->{$property};
+        if (ref($item->{$property}) eq 'ARRAY') {
+            $hash->{$property} = [
+                map { $_ } @{$item->{$property}}
+            ];
+        } elsif (ref($item->{$property}) eq 'HASH') {
+            $hash->{$property} = {
+                map { $_ => _extract($item->{$property}, [ keys(%{$item->{$property}}) ]) } keys(%{$item->{$property}})
+            };
+        } else {
+            $hash->{$property} = $item->{$property};
+        }
     }
 
     return $hash;
@@ -412,8 +433,8 @@ sub runmethod {
             $action,
             $messageid,
             MaxEnvelopeSize->new(512000),
-            Locale->new("en-US"),
-            DataLocale->new("en-US"),
+            Locale->new($self->{_lang}),
+            DataLocale->new($self->{_lang}),
             $sid,
             $operationid,
             SequenceId->new(),
@@ -464,7 +485,8 @@ sub runmethod {
         } elsif (@nodes && $key =~ /^sNames|Types$/) {
             $value = [ map { $_->string() } @nodes ];
         } elsif ($keynode) {
-            $value = $key =~ /^sNames|Types$/ ? [ $keynode->string ] : $keynode->string;
+            my $string = $keynode->string;
+            $value = $key =~ /^sNames|Types$/ ? [ $string ] : $string;
         }
         if ($params{binds} && $params{binds}->{$key}) {
             $key = $params{binds}->{$key};
@@ -503,7 +525,7 @@ sub shell {
     # WinRS option set
     my $optionset = OptionSet->new(
         Option->new( WINRS_NOPROFILE    => "TRUE" ),
-        Option->new( WINRS_CODEPAGE     => "437" ),
+        Option->new( WINRS_CODEPAGE     => "65001" ),
     );
 
     # Create a remote shell
@@ -516,8 +538,8 @@ sub shell {
             $action,
             $messageid,
             MaxEnvelopeSize->new(512000),
-            Locale->new("en-US"),
-            DataLocale->new("en-US"),
+            Locale->new($self->{_lang}),
+            DataLocale->new($self->{_lang}),
             $sid,
             $operationid,
             SequenceId->new(),
@@ -583,8 +605,8 @@ sub shell {
             $action,
             $messageid,
             MaxEnvelopeSize->new(512000),
-            Locale->new("en-US"),
-            DataLocale->new("en-US"),
+            Locale->new($self->{_lang}),
+            DataLocale->new($self->{_lang}),
             $sid,
             $operationid,
             SequenceId->new(),
@@ -677,8 +699,8 @@ sub receive {
                 Action->new("receive"),
                 $messageid,
                 MaxEnvelopeSize->new(512000),
-                Locale->new("en-US"),
-                DataLocale->new("en-US"),
+                Locale->new($self->{_lang}),
+                DataLocale->new($self->{_lang}),
                 $sid,
                 $operationid,
                 SequenceId->new(),
@@ -769,8 +791,8 @@ sub signal {
             Action->new("signal"),
             $messageid,
             MaxEnvelopeSize->new(512000),
-            Locale->new("en-US"),
-            DataLocale->new("en-US"),
+            Locale->new($self->{_lang}),
+            DataLocale->new($self->{_lang}),
             $sid,
             $operationid,
             SequenceId->new(),
@@ -827,8 +849,8 @@ sub delete {
             Action->new("delete"),
             $messageid,
             MaxEnvelopeSize->new(512000),
-            Locale->new("en-US"),
-            DataLocale->new("en-US"),
+            Locale->new($self->{_lang}),
+            DataLocale->new($self->{_lang}),
             $sid,
             $operationid,
             SequenceId->new(),

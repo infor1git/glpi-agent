@@ -25,6 +25,7 @@ Options:
     -h --help           Show the help
     --no-merge --devel  Don't merge the created release branch
     --no-git            Don't use git command to create commits, tag and merge
+    --no-deb-changelog  Don't try to update debian packaging changelog
     --debrev N          Set debian package revision to N (defaults=1)
 HELP
             ;;
@@ -33,6 +34,9 @@ HELP
             ;;
         --no-git)
             GIT="no"
+            ;;
+        --no-deb-changelog)
+            DEBCHANGELOG="skip"
             ;;
         --debrev)
             shift
@@ -80,7 +84,7 @@ tools/updateSysobjectids.pl
 
 # 2. Make a commit for IDS files update
 if [ "$GIT" != "no" ]; then
-    if git status -s | egrep -q "share/(pci|usb|sysobject)\.ids$"; then
+    if git status -s | grep -E -q "share/(pci|usb|sysobject)\.ids$"; then
         git commit -a -m "feat: Updated IDS files"
     fi
 fi
@@ -124,13 +128,32 @@ our \$COMMENTS = [
 ];
 VERSION
 
+# Compute next release minor version for replacement in few scripts
+MAJORVERSION=${VERSION%%.*}
+MINORVERSION=${VERSION%%-*}
+MINORVERSION=${MINORVERSION#*.}
+MINORVERSION=${MINORVERSION%.*}
+NEXTMINOR=$((MINORVERSION+1))
+
+# Also update SetupVersion in VBS
+sed -ri -e "s/^SetupVersion = .*$/SetupVersion = \"$VERSION\"/" \
+    -e "s/^'SetupVersion = .*$/'SetupVersion = \"$MAJORVERSION.$NEXTMINOR-gitABCDEFGH\"/" \
+    contrib/windows/glpi-agent-deployment.vbs
+
+# Update default version in scripts
+sed -ri -e "s/^: \$\{VERSION:=.*\}$/: \${VERSION:=$VERSION}/" \
+    contrib/unix/make-linux-appimage.sh \
+    contrib/unix/make-linux-installer.sh
+sed -ri -e "s/VERSION => .*$/VERSION => \"$MAJORVERSION.$NEXTMINOR-dev\";/" \
+    contrib/unix/installer/InstallerVersion.pm
+
 # 4. Update tasks version if required
 perl -Itools -MChangelog -e '
     my @tasks = qw(
-        Inventory NetDiscovery NetInventory Collect ESX Deploy WakeOnLan
+        Inventory NetDiscovery NetInventory Collect ESX Deploy WakeOnLan RemoteInventory
     );
     my @plugins = qw(
-        ToolBox
+        ToolBox BasicAuthentication Proxy SSL Test
     );
     my $count = 0;
     my $Changes = Changelog->new( file => "Changes" );
@@ -145,7 +168,7 @@ perl -Itools -MChangelog -e '
 
 # 5. Update changelog version and release date
 RELEASE_DATE=$(LANG=C date +"%a, %d %b %Y")
-sed -ri -e "s/.* not released yet/$VERSION $RELEASE_DATE/" Changes
+sed -ri -e "s/.* (not released yet|not yet released)/$VERSION $RELEASE_DATE/" Changes
 
 # Update version in Makefile.PL
 sed -ri -e "s/^version '.*';$/version '$VERSION';/" Makefile.PL
@@ -156,12 +179,14 @@ export DEBEMAIL="$(git config --get user.email)"
 : ${DEBFULLNAME:=$(git log --pretty=format:"%an" -n 1)}
 : ${DEBEMAIL:=$(git log --pretty=format:"%ae" -n 1)}
 if [ -n "$DEBFULLNAME" -a -n "$DEBEMAIL" ]; then
-    CURRENT=$(dpkg-parsechangelog -S version)
-    EPOCH=${CURRENT%%:*}
-    if [ "${VERSION%-*}" = "$VERSION" -a -z "$DEBREV" ]; then
-        DEBREV="-1"
+    if [ -z "$DEBCHANGELOG" -o "$DEBCHANGELOG" != "skip" ]; then
+        CURRENT=$(dpkg-parsechangelog -S version)
+        EPOCH=${CURRENT%%:*}
+        if [ "${VERSION%-*}" = "$VERSION" -a -z "$DEBREV" ]; then
+            DEBREV="-1"
+        fi
+        dch -b -D unstable --newversion "$EPOCH:$VERSION$DEBREV" "New upstream release $VERSION"
     fi
-    dch -b -D unstable --newversion "$EPOCH:$VERSION$DEBREV" "New upstream release $VERSION"
 else
     echo "No github user or email set, aborting" >&2
     exit 1

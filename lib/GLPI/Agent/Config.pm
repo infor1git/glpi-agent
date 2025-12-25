@@ -22,6 +22,8 @@ my $default = {
     'conf-reload-interval'    => 0,
     'debug'                   => undef,
     'delaytime'               => 3600,
+    'remote-scheduling'       => 0,
+    'remote-workers'          => 1,
     'force'                   => undef,
     'html'                    => undef,
     'json'                    => undef,
@@ -48,11 +50,13 @@ my $default = {
     'scan-profiles'           => undef,
     'server'                  => undef,
     'ssl-cert-file'           => undef,
+    'ssl-fingerprint'         => undef,
     'tag'                     => undef,
     'tasks'                   => undef,
     'timeout'                 => 180,
     'user'                    => undef,
     'vardir'                  => undef,
+    'assetname-support'       => 1,
 };
 
 my $confReloadIntervalMinValue = 60;
@@ -185,11 +189,17 @@ sub _loadFromRegistry {
     foreach my $rawKey (keys %$settings) {
         next unless $rawKey =~ /^\/(\S+)/;
         my $key = lc($1);
-        my $val = $settings->{$rawKey};
-        # Remove the quotes
-        $val =~ s/\s+$//;
-        $val =~ s/^'(.*)'$/$1/;
-        $val =~ s/^"(.*)"$/$1/;
+        my ($val, $type) = $settings->GetValue($key);
+
+        if ($type == Win32::TieRegistry::REG_SZ()) {
+            $val =~ s/\s+$//;
+            $val =~ s/^'(.*)'$/$1/;
+            $val =~ s/^"(.*)"$/$1/;
+        }
+
+        if ($type == Win32::TieRegistry::REG_DWORD()) {
+            $val = hex($val);
+        }
 
         if (exists $default->{$key}) {
             $self->{$key} = $val;
@@ -337,8 +347,8 @@ sub _checkContent {
             no-task
             no-category
             tasks
-            /) {
-
+            ssl-fingerprint
+    /) {
         # Check if defined AND SCALAR
         # to avoid split a ARRAY ref or HASH ref...
         if ($self->{$option} && ref($self->{$option}) eq '') {
@@ -348,17 +358,17 @@ sub _checkContent {
         }
     }
 
-    # files location
-    $self->{'ca-cert-file'} =
-        File::Spec->rel2abs($self->{'ca-cert-file'}) if $self->{'ca-cert-file'};
-    $self->{'ca-cert-dir'} =
-        File::Spec->rel2abs($self->{'ca-cert-dir'}) if $self->{'ca-cert-dir'};
-    $self->{'ssl-cert-file'} =
-        File::Spec->rel2abs($self->{'ssl-cert-file'}) if $self->{'ssl-cert-file'};
-    $self->{'logfile'} =
-        File::Spec->rel2abs($self->{'logfile'}) if $self->{'logfile'};
-    $self->{'vardir'} =
-        File::Spec->rel2abs($self->{'vardir'}) if $self->{'vardir'};
+    # Normalize files and folders path
+    foreach my $option (qw/
+            ca-cert-file
+            ca-cert-dir
+            ssl-cert-file
+            logfile
+            vardir
+    /) {
+        next unless $self->{$option};
+        $self->{$option} = File::Spec->rel2abs($self->{$option});
+    }
 
     # conf-reload-interval option
     # If value is less than the required minimum, we force it to that
@@ -405,7 +415,8 @@ sub getTargets {
             push @targets,
                 GLPI::Agent::Target::Local->new(
                     logger     => $params{logger},
-                    delaytime  => $self->{delaytime},
+                    maxDelay   => $self->{delaytime},
+                    delaytime  => $self->{delaytime} > 3600 ? 3600 : $self->{delaytime},
                     basevardir => $params{vardir},
                     path       => $path,
                     html       => $self->{html},

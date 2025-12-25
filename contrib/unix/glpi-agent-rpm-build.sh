@@ -85,10 +85,10 @@ eval "$RPMBUILD -ba $BUILD_OPTS $OTHER_OPTS contrib/unix/glpi-agent.spec"
 RPMDIR=$(rpm --eval "%{_rpmdir}")
 SRPMDIR=$(rpm --eval "%{_srcrpmdir}")
 echo "RPMDIR: $RPMDIR"
-if [ -n "$GITHUB_REF" ]; then
-    echo "::set-output name=rpmdir:: $RPMDIR"
-    echo "::set-output name=srcdir:: $SRCDIR"
-    echo "::set-output name=srpmdir:: $SRPMDIR"
+if [ -n "$GITHUB_OUTPUT" ]; then
+    echo "rpmdir=$RPMDIR" >>$GITHUB_OUTPUT
+    echo "srcdir=$SRCDIR" >>$GITHUB_OUTPUT
+    echo "srpmdir=$SRPMDIR" >>$GITHUB_OUTPUT
 fi
 for rpm in $(eval "rpmspec -q $BUILD_OPTS contrib/unix/glpi-agent.spec")
 do
@@ -96,5 +96,5 @@ do
     ARCH=${rpm##*.}
     [ -e "$RPMDIR/$ARCH/$rpm.rpm" ] || exit 1
     echo "$BASE-rpm: $(ls -l $RPMDIR/$ARCH/$rpm.rpm)"
-    [ -n "$GITHUB_REF" ] && echo "::set-output name=$BASE-rpm:: $RPMDIR/$ARCH/$rpm.rpm"
+    [ -n "$GITHUB_REF" ] && echo "$BASE-rpm=$RPMDIR/$ARCH/$rpm.rpm" >>$GITHUB_OUTPUT
 done

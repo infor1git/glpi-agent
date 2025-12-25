@@ -2820,6 +2820,56 @@ my %tests = (
             'TYPE'             => undef
         },
     ],
+    'memory/hynix-kingmax' => [
+        {
+            CAPACITY         => 8192,
+            CAPTION          => 'DIMM A',
+            DESCRIPTION      => 'SODIMM',
+            MANUFACTURER     => 'Hynix',
+            MEMORYCORRECTION => undef,
+            MODEL            => 'HMAA1GS6CJR6N-XN',
+            NUMSLOTS         => 1,
+            SERIALNUMBER     => '25477B84',
+            SPEED            => '3200',
+            TYPE             => 'DDR4'
+        },
+        {
+            CAPACITY         => 8192,
+            CAPTION          => 'DIMM B',
+            DESCRIPTION      => 'SODIMM',
+            MANUFACTURER     => 'KingMax',
+            MEMORYCORRECTION => undef,
+            MODEL            => 'GSOG42F-18',
+            NUMSLOTS         => 2,
+            SERIALNUMBER     => '190020CB',
+            SPEED            => '3200',
+            TYPE             => 'DDR4'
+        }
+    ],
+    'memory/positivo-informatica' => [
+        {
+            CAPTION          => 'ChannelA-DIMM0',
+            DESCRIPTION      => 'DIMM',
+            MANUFACTURER     => undef,
+            MEMORYCORRECTION => undef,
+            NUMSLOTS         => 1,
+            SERIALNUMBER     => undef,
+            SPEED            => undef,
+            TYPE             => undef
+        },
+        {
+            CAPACITY         => 8192,
+            CAPTION          => 'ChannelB-DIMM0',
+            DESCRIPTION      => 'SODIMM',
+            MANUFACTURER     => 'Positivo Informática',
+            MEMORYCORRECTION => undef,
+            MODEL            => 'P48808GSHCRN-VK',
+            NUMSLOTS         => 2,
+            SERIALNUMBER     => '0000065D',
+            SPEED            => '2667',
+            TYPE             => 'DDR4'
+        }
+    ]
 );
 
 plan tests => (2 * scalar keys %tests) + 1;

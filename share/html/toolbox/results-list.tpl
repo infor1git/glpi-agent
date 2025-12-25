@@ -25,14 +25,14 @@
     <input type='hidden' name='form' value='{$request}'/>
     <input type='hidden' id='display' name='display' value='{$display}'/>
 {
-    $list_nav = Text::Template::fill_in_file($template_path."/list-navigation.tpl", HASH => $hash)
+    $listnav = Text::Template::fill_in_file($template_path."/list-navigation.tpl", HASH => $hash)
       || "Error loading list-navigation.tpl template: $Text::Template::ERROR"
 }    <table>
       <thead>
         <tr>
           <th class='checkbox' title='{_"Revert selection"}'>{ @columns ? "
             <label class='checkbox'>
-              <input class='checkbox' type='checkbox' onclick='toggle_all(this)'>
+              <input class='checkbox' type='checkbox' onclick='toggle_all(this)'/>
               <span class='custom-checkbox all_cb'></span>
             </label>
           ": "&nbsp;"
@@ -62,7 +62,7 @@
           <td class='checkbox'>
             <label class='checkbox'>
               <input class='checkbox' type='checkbox' name='checkbox/$entry'".
-              ($edit && $edit eq $entry ? " checked" : "").">
+              ($edit && $edit eq $entry ? " checked" : "")."/>
               <span class='custom-checkbox'></span>
             </label>
           </td>";
@@ -97,7 +97,7 @@
         <tr>
           <th class='checkbox'>
             <label class='checkbox'>
-              <input class='checkbox' type='checkbox' onclick='toggle_all(this)'>
+              <input class='checkbox' type='checkbox' onclick='toggle_all(this)'/>
               <span class='custom-checkbox all_cb'></span>
             </label>
           </th>";
@@ -116,11 +116,11 @@
       </thead>";
   }}
     </table>{
-    $listed >= 50 ? $list_nav : "" }
+    $listed >= 50 ? $listnav : "" }
     <div class='select-row'>
-      <div class='arrow-left'></div>
-      <input class='submit-secondary' type='submit' name='submit/delete' value='{_"Delete"}'>
-      <input class='submit-secondary' type='submit' name='submit/scan' value='{_"Scan again"}'>{
+      <i class='ti ti-corner-left-up arrow-left'></i>
+      <button class='secondary' type='submit' name='submit/delete' alt='{_"Delete"}' value='1'><i class='primary ti ti-trash'></i>{_"Delete"}</button>
+      <button class='secondary' type='submit' name='submit/scan' alt='{_"Scan again"}' value='1'><i class='primary ti ti-player-play-filled'></i>{_"Scan again"}</button>{
     if (@tags||"") { # The test avoids to render a 0 when no tag is defined
       $OUT .= "
       <div class='separation'></div>
@@ -134,8 +134,8 @@
     }}
     </div>
     <hr/>
-    <input class='big-button' type='submit' name='submit/export' value='{_"Download results"}' title='{_"Results will be filtered by tag if set"}'>
-    <input class='big-button' type='submit' name='submit/full-export' value='{_"Download full scan datas"}' title='{_"No filtering by tag will be applied"}'>
+    <button class='big-button' type='submit' name='submit/export' value='1' alt='{_"Download results"}' title='{_"Results will be filtered by tag if set"}'><i class='primary ti ti-download'></i>{_"Download results"}</button>
+    <button class='big-button' type='submit' name='submit/full-export' value='1' alt='{_"Download full scan datas"}' title='{_"No filtering by tag will be applied"}'><i class='primary ti ti-world-download'></i>{_"Download full scan datas"}</button>
   </form>
   <script>
   function toggle_all(from) \{

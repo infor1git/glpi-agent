@@ -51,6 +51,22 @@ sub getBaseInterface {
     $interface->{DNSDomain} = $self->{_config}->{DNSDomain} if $self->{_config}->{DNSDomain};
     $interface->{SPEED}     = int($self->{Speed} / 1_000_000) if $self->{Speed};
 
+    if ($self->{InterfaceType}) {
+        # Interface type as defined by the Internet Assigned Names Authority (IANA)
+        # Same list as default GLPI supported types
+        my %types = qw(
+            6   ethernet
+            7   ethernet
+            56  fiberchannel
+            62  ethernet
+            71  wifi
+            117 ethernet
+            169 ethernet
+        );
+        $interface->{TYPE} = $types{$self->{InterfaceType}}
+            if $types{$self->{InterfaceType}};
+    }
+
     return $interface;
 }
 
@@ -98,7 +114,8 @@ sub _isVirtual {
     return 1 if $self->_getPNPDeviceID() =~ /^ROOT/;
 
     # PhysicalAdapter only work on OS > XP
-    return $self->_getPhysicalAdapter() ? 0 : 1 if defined $self->_getPhysicalAdapter();
+    my $physical = $self->{HardwareInterface} || $self->{PhysicalAdapter};
+    return $physical =~ /^1|true/i ? 0 : 1 if defined($physical);
 
     # http://forge.fusioninventory.org/issues/1166
     my $description = $self->_getDescription();
@@ -127,12 +144,6 @@ sub _getGUID {
     my ($self) = @_;
 
     return $self->{InterfaceGuid} || $self->{GUID};
-}
-
-sub _getPhysicalAdapter {
-    my ($self) = @_;
-
-    return $self->{HardwareInterface} || $self->{PhysicalAdapter};
 }
 
 sub _getPNPDeviceID {

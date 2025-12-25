@@ -4,14 +4,13 @@ use strict;
 use warnings;
 
 use English qw(-no_match_vars);
-use XML::TreePP;
-use XML::XPath;
 use Compress::Zlib;
 use File::Temp;
 
 use base "GLPI::Agent::HTTP::Server::Plugin";
 
 use GLPI::Agent::Tools;
+use GLPI::Agent::XML;
 use GLPI::Agent::Tools::UUID;
 use GLPI::Agent::HTTP::Client::OCS;
 use GLPI::Agent::HTTP::Client::GLPI;
@@ -19,7 +18,7 @@ use GLPI::Agent::HTTP::Client::GLPI;
 use GLPI::Agent::Protocol::Message;
 use GLPI::Agent::Protocol::Answer;
 
-our $VERSION = "2.1";
+our $VERSION = "2.3";
 
 sub urlMatch {
     my ($self, $path) = @_;
@@ -54,8 +53,12 @@ sub defaults {
         # Supported by class GLPI::Agent::HTTP::Server::Plugin
         maxrate             => 30,
         maxrate_period      => 3600,
+        forbid_not_trusted  => "no",
     };
 }
+
+# Don't publish an url on glpi-agent index page
+sub url {}
 
 sub supported_method {
     my ($self, $method) = @_;
@@ -348,26 +351,19 @@ sub _handle_proxy_request {
         print $in $content;
         close($in);
 
-        my $out;
-        eval {
-            $out = getFileHandle(
-                command => 'gzip -dc ' . $in->filename(),
-                logger  => $self->{logger}
-            );
-        };
+        $content = getAllLines(
+            command => 'gzip -dc ' . $in->filename(),
+            logger  => $self->{logger}
+        );
 
-        unless ($out) {
+        unless (defined($content)) {
             $self->info("Can't uncompress $content_type Content-type in $self->{request} request from $clientIp");
             return $self->proxy_error(403, "Unsupported $content_type Content-type");
         }
-
-        local $INPUT_RECORD_SEPARATOR; # Set input to "slurp" mode.
-        $content = <$out>;
-        close($out);
     }
 
     # Fix content-type if it has been uncompressed
-    if ($content_type =~ m|^application/x-compress|) {
+    if ($content_type =~ m|^application/x-compress|i) {
         $content_type = "application/json" if $content =~ /^{/;
         $content_type = "application/xml" if $content =~ /^<\?xml/;
     }
@@ -382,12 +378,8 @@ sub _handle_proxy_request {
         my $message;
         if ($content_type !~ m|^application/json$|i) {
             # Only not json request expected here is a contact request
-            my $xml;
-            eval {
-                my $tpp = XML::TreePP->new();
-                $xml = $tpp->parse($content);
-            };
-            if ($EVAL_ERROR) {
+            my $xml = GLPI::Agent::XML->new(string => $content)->dump_as_hash();
+            unless ($xml) {
                 $self->debug("Not supported message: $EVAL_ERROR");
                 return $self->proxy_error(403, "Unsupported Content");
             }
@@ -456,18 +448,20 @@ sub _handle_proxy_request {
 
         if ($local_store && $action ne "contact") {
             my $file = $local_store;
+            my $json = ($message->get("deviceid") || $agentid).".json";
             $file =~ s|/*$||;
-            $file .= "/$agentid.data";
-            $self->debug("Saving datas from $remoteid in $file");
+            $file .= "/$json";
+            $self->debug("Saving $json from $remoteid in $local_store");
             my $DATA;
             unless (open($DATA, '>', $file)) {
-                $self->error("Can't store datas from $remoteid");
-                return $self->proxy_error(500, "Proxy failed to store datas");
+                $self->error("Can't store $json from $remoteid");
+                return $self->proxy_error(500, "Proxy failed to store json");
             }
+            binmode($DATA);
             print $DATA $content;
             close($DATA);
             unless (-s $file == length($content)) {
-                $self->error("Failed to store datas from $remoteid");
+                $self->error("Failed to store $json from $remoteid");
                 return $self->proxy_error(500, "Proxy storing failure");
             }
         }
@@ -525,18 +519,10 @@ sub _handle_proxy_request {
 
         # Prepare a client to foward request
         my $proxyclient = GLPI::Agent::HTTP::Client::GLPI->new(
-            logger       => $self->{logger},
-            timeout      => $serverconfig->{timeout},
-            user         => $serverconfig->{user},
-            password     => $serverconfig->{password},
-            proxy        => $serverconfig->{proxy},
-            ca_cert_file => $serverconfig->{'ca-cert-file'},
-            ca_cert_dir  => $serverconfig->{'ca-cert-dir'},
-            no_ssl_check => $serverconfig->{'no-ssl-check'},
-            ssl_cert_file => $serverconfig->{'ssl-cert-file'},
-            no_compress  => $serverconfig->{'no-compression'},
-            agentid      => $agentid,
-            proxyid      => $proxyid,
+            logger  => $self->{logger},
+            config  => $serverconfig,
+            agentid => $agentid,
+            proxyid => $proxyid,
         );
 
         foreach my $target (@servers) {
@@ -579,7 +565,7 @@ sub _handle_proxy_request {
 
     # Fallback here to legacy passive proxy mode, only for XML inventory submission
 
-    if ($content_type !~ m|^application/xml$|i) {
+    if ($content_type !~ m|^application/xml|i) {
         $self->info("Unsupported '$content_type' Content-type header provided in $self->{request} request from $clientIp");
         return $self->proxy_error(403, 'Unsupported Content-type');
     }
@@ -592,20 +578,15 @@ sub _handle_proxy_request {
     my $deviceid;
     if ($content =~ m|^<\?xml|ms) {
         # Check if it's a PROLOG request
-        my $parser = XML::XPath->new(xml => $content);
-
-        # Don't validate XML against DTD, parsing may fail if a proxy is active
-        $XML::XPath::ParseParamEnt = 0;
-
-        my $query;
-        eval {
-            $query = $parser->getNodeText("/REQUEST/QUERY");
-        };
-        if ($EVAL_ERROR) {
+        my $xml = GLPI::Agent::XML->new(string => $content);
+        unless ($xml->has_xml()) {
             $self->info("Unsupported content in $self->{request} request from $clientIp");
             $self->debug("Content from $clientIp was starting with '".(substr($content,0,40))."'");
             return $self->proxy_error(403, 'Unsupported xml content');
         }
+
+        my $dump = $xml->dump_as_hash();
+        my $query = exists($dump->{REQUEST}->{QUERY}) ? $dump->{REQUEST}->{QUERY} : '';
 
         unless ($query && $query =~ /^PROLOG|INVENTORY$/) {
             $self->info("Not supported ".($query||"unknown")." query from $remoteid");
@@ -619,7 +600,7 @@ sub _handle_proxy_request {
             return $self->proxy_error(403, 'Unsupported query');
         }
 
-        $deviceid = $parser->getNodeText("/REQUEST/DEVICEID");
+        $deviceid = exists($dump->{REQUEST}->{DEVICEID}) ? $dump->{REQUEST}->{DEVICEID} : '';
 
         unless ($deviceid) {
             $self->info("Not supported $query query from $remoteid");
@@ -633,7 +614,7 @@ sub _handle_proxy_request {
 
             $self->debug2("PROLOG request from $remoteid");
 
-            my $tpp = XML::TreePP->new(indent => 2);
+            my $xml = GLPI::Agent::XML->new();
             my $data = {
                 REPLY => {
                     RESPONSE    => 'SEND',
@@ -645,7 +626,7 @@ sub _handle_proxy_request {
                 200,
                 'OK',
                 HTTP::Headers->new( 'Content-Type' => 'application/xml' ),
-                $tpp->write($data)
+                $xml->write($data)
             );
 
             $client->send_response($response);
@@ -686,6 +667,7 @@ sub _handle_proxy_request {
             $self->error("Can't store content from $clientIp $self->{request} request");
             return $self->proxy_error(500, 'Proxy cannot store content');
         }
+        binmode($XML);
         print $XML $content;
         close($XML);
         if (-s $xmlfile != length($content)) {
@@ -700,15 +682,8 @@ sub _handle_proxy_request {
 
     if (@servers) {
         my $proxyclient = GLPI::Agent::HTTP::Client::OCS->new(
-            logger       => $self->{logger},
-            user         => $serverconfig->{user},
-            password     => $serverconfig->{password},
-            proxy        => $serverconfig->{proxy},
-            ca_cert_file => $serverconfig->{'ca-cert-file'},
-            ca_cert_dir  => $serverconfig->{'ca-cert-dir'},
-            no_ssl_check => $serverconfig->{'no-ssl-check'},
-            no_compress  => $serverconfig->{'no-compress'},
-            ssl_cert_file => $serverconfig->{'ssl-cert-file'},
+            logger  => $self->{logger},
+            config  => $serverconfig,
         );
 
         my $message = GLPI::Agent::HTTP::Server::Proxy::Message->new(

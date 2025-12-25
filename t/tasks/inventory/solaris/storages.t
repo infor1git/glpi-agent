@@ -1734,6 +1734,45 @@ my %tests = (
             MODEL        => 'CD/DVDW TS-L632D'
         },
     ],
+    'oi-2021.10' => [
+        {
+            MANUFACTURER => 'ATA',
+            DESCRIPTION  => 'S/N:VBe174c9f2-fe68 FW:1.0',
+            NAME         => 'c5t0d0',
+            FIRMWARE     => '1.0',
+            DISKSIZE     => 34359,
+            SERIALNUMBER => 'VBe174c9f2-fe68',
+            MODEL        => 'VBOX HARDDISK'
+        },
+        {
+            DISKSIZE     => 0,
+            NAME         => 'c5t1d0',
+            FIRMWARE     => '1.0',
+            MANUFACTURER => 'VBOX',
+            DESCRIPTION  => 'FW:1.0',
+            MODEL        => 'CD-ROM'
+        }
+    ],
+    'oi151' => [
+        {
+            MANUFACTURER => 'DELL',
+            DESCRIPTION  => 'S/N:xxxxxxxxxxxxxx FW:2.10',
+            NAME         => 'c3t0d0',
+            FIRMWARE     => '2.10',
+            DISKSIZE     => 107374,
+            SERIALNUMBER => 'xxxxxxxxxxxxxx',
+            MODEL        => 'PERC H700'
+        },
+        {
+            DISKSIZE     => 19891067,
+            NAME         => 'c3t1d0',
+            FIRMWARE     => '2.10',
+            MANUFACTURER => 'DELL',
+            DESCRIPTION  => 'S/N:xxxxxxxxxxxxxx FW:2.10',
+            SERIALNUMBER => 'xxxxxxxxxxxxxx',
+            MODEL        => 'PERC H700'
+        }
+    ],
 );
 
 plan tests => (2 * scalar keys %tests) + 1;

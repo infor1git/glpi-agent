@@ -1,21 +1,26 @@
+{ # This comment to keep a line feed at the beginning of this template inclusion }
   <form name='{$request}' method='post' action='{$url_path}/{$request}'>
     <input type='hidden' name='form' value='{$request}'/>
     <input type='hidden' id='display' name='display' value='{$display}'/>{
-    use Encode qw(encode);
-    use HTML::Entities;
-    use URI::Escape;
-    $listnav = Text::Template::fill_in_file($template_path."/list-navigation.tpl", HASH => $hash)
-      || "Error loading list-navigation.tpl template: $Text::Template::ERROR" }
+use Encode qw(encode);
+use HTML::Entities;
+use URI::Escape;
+
+if (@ranges_order) {
+  my $listnav = Text::Template::fill_in_file($template_path."/list-navigation.tpl", HASH => $hash);
+  chomp($listnav) if defined($listnav);
+  $OUT .= $listnav ? $listnav : "
+    <div id='errors'><p>Error loading list-navigation.tpl template: $Text::Template::ERROR</p></div>";
+  $OUT .= "
     <table class='ip_range'>
       <thead>
         <tr>
-          <th class='checkbox' title='{_"Revert selection"}'>{ @ranges_order ? "
+          <th class='checkbox' title='"._("Revert selection")."'>
             <label class='checkbox'>
-              <input class='checkbox' type='checkbox' onclick='toggle_all(this)'>
+              <input class='checkbox' type='checkbox' onclick='toggle_all(this)'/>
               <span class='custom-checkbox all_cb'></span>
             </label>
-          ": "&nbsp;"
-          }</th>{
+          </th>";
   $other_order = $order eq 'ascend' ? 'descend' : 'ascend';
   foreach my $column (@columns) {
     my ($name, $text) = @{$column};
@@ -24,13 +29,15 @@
           <th".($name eq $ordering_column ? " class='col-sort-$order'" : "").">
             <a class='noline' href='$url_path/$request?col=$name&order=$order_req'";
     $OUT .= "&start=$start" if $start;
-    $OUT .= ">"._($text)."</a></th>";
-  }}
+    $OUT .= ">"._($text)."</a>
+          </th>";
+  }
+  $OUT .= "
         </tr>
       </thead>
-      <tbody>{
+      <tbody>";
   my $count = -$start;
-  $listed = 0;
+  my $listed = 0;
   foreach my $entry (@ranges_order) {
     next unless $count++>=0;
     $listed++;
@@ -40,34 +47,40 @@
     my $ip_start = $range->{ip_start} || "";
     my $ip_end   = $range->{ip_end} || "";
     my $tips     = $range->{id} ? " title='id=".$range->{id}."'": "";
+    my $checked  = $form{"checkbox/$entry"} eq "on" ? " checked" : "";
     my $description = $range->{description} || "";
-    my $thiscredentials = join("<br/>", map {
-            encode('UTF-8', encode_entities($credentials{$_}->{name} || $_))
-        } @{$range->{credentials}});
     $OUT .= "
         <tr class='$request'$tips>
           <td class='checkbox'>
             <label class='checkbox'>
-              <input class='checkbox' type='checkbox' name='checkbox/".encode_entities($entry)."'".
-              ($edit && $edit eq $entry ? " checked" : "").">
+              <input class='checkbox' type='checkbox' name='checkbox/$this'$checked/>
               <span class='custom-checkbox'></span>
             </label>
           </td>
           <td class='list' width='10%'><a href='$url_path/$request?edit=".uri_escape($this)."'>$name</a></td>
           <td class='list' width='10%'>$ip_start</td>
           <td class='list' width='10%'>$ip_end</td>
-          <td class='list' width='10%'>$thiscredentials</td>
+          <td class='list' width='10%'>
+            <ul class='config'>".join("", map { "
+              <li class='config'>
+                <div class='with-tooltip'>
+                  <a href='$url_path/credentials?edit=".uri_escape(encode("UTF-8", $_))."'>".encode('UTF-8', encode_entities($credentials{$_}->{name} || $_))."
+                    <div class='tooltip right-tooltip'>".($credentials{$_}->{type} ? "
+                      <p>"._("Type").":&nbsp;".$credentials{$_}->{type}."</p>" : "").((!$credentials{$_}->{type} || $credentials{$_}->{type} eq "snmp") && $credentials{$_}->{snmpversion} ? "
+                      <p>"._("SNMP version").":&nbsp;".$credentials{$_}->{snmpversion}."</p>" : "")."
+                      <p>".((!$credentials{$_}->{type} || $credentials{$_}->{type} eq "snmp") && $credentials{$_}->{snmpversion} && $credentials{$_}->{snmpversion} ne "v3" ? _("Community").":&nbsp;".$credentials{$_}->{community} : _("Username").":&nbsp;".$credentials{$_}->{username})."</p>".($credentials{$_}->{description} ? "
+                      <p>"._("Description").":&nbsp;".encode('UTF-8', $credentials{$_}->{description})."</p>" : "")."
+                      <i></i>
+                    </div>
+                  </a>
+                </div>
+              </li>"
+            } @{$range->{credentials}})."
+            </ul>
+          </td>
           <td class='list'>$description</td>
         </tr>";
     last if $display && $count >= $display;
-  }
-  # Handle empty list case
-  unless (@ranges_order) {
-    $OUT .= "
-        <tr class='$request'>
-          <td width='20px'>&nbsp;</td>
-          <td class='list' colspan='5'>"._("empty list")."</td>
-        </tr>";
   }
   $OUT .= "
       </tbody>";
@@ -77,7 +90,7 @@
         <tr>
           <th class='checkbox' title='"._("Revert selection")."'>
             <label class='checkbox'>
-              <input class='checkbox' type='checkbox' onclick='toggle_all(this)'>
+              <input class='checkbox' type='checkbox' onclick='toggle_all(this)'/>
               <span class='custom-checkbox all_cb'></span>
             </label>
           </th>";
@@ -94,28 +107,35 @@
     $OUT .= "
         </tr>
       </tbody>";
-  }}
-    </table>{
-    $listed >= 50 ? $listnav : "" }
+  }
+  my $credential = $form{"input/credentials"} || "";
+  $OUT .= "
+    </table>
     <div class='select-row'>
-      <div class='arrow-left'></div>
-      <input class='submit-secondary' type='submit' name='submit/delete' value='{_"Delete"}'>
+      <i class='ti ti-corner-left-up arrow-left'></i>
+      <button class='secondary' type='submit' name='submit/delete' value='1' alt='"._("Delete")."'><i class='primary ti ti-trash'></i>"._("Delete")."</button>
       <div class='separation'></div>
-      <label class='selection-option'>{_"Associated credentials"}:</label>
+      <label class='selection-option'>"._("Associated credentials")."</label>
       <select class='selection-option' name='input/credentials'>
-        <option{
-          $credential = $form{"input/credentials"} || "";
-          $credential ? "" : " selected"}></option>{
+        <option".($credential ? "" : " selected")."></option>".
           join("", map { "
         <option".(($credential && $credential eq $_)? " selected" : "").
           " value='$_'>".($credentials{$_}->{name} || $_)."</option>"
-        } @cred_options)}
+        } @cred_options)."
       </select>
-      <input class='submit-secondary' type='submit' name='submit/addcredential' value='{_"Add credential"}'>
-      <input class='submit-secondary' type='submit' name='submit/rmcredential' value='{_"Remove credential"}'>
-    </div>
+      <button class='secondary' type='submit' name='submit/addcredential' value='1' alt='"._("Add credential")."'><i class='primary ti ti-playlist-add'></i>"._("Add credential")."</button>
+      <button class='secondary' type='submit' name='submit/rmcredential' value='1' alt='"._("Remove credential")."'><i class='primary ti ti-playlist-x'></i>"._("Remove credential")."</button>
+    </div>";
+  $OUT .= $listnav if $listed >= 50 && $listnav;
+} else {
+  # Handle empty list case
+  $OUT .= "
+    <div id='empty-list'>
+      <p>"._("No IP range defined")."</p>
+    </div>";
+}}
     <hr/>
-    <input class='big-button' type='submit' name='submit/add' value='{_"Add new IP range"}'>
+    <button class='big-button' type='submit' name='submit/add' value='1' alt='{_"Add new IP range"}'><i class='primary ti ti-plus'></i>{_"Add new IP range"}</button>
   </form>
   <script>
   function toggle_all(from) \{

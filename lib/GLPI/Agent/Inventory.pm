@@ -10,6 +10,7 @@ use UNIVERSAL::require;
 
 use GLPI::Agent::Logger;
 use GLPI::Agent::Tools;
+use GLPI::Agent::XML;
 use GLPI::Agent::Version;
 
 use GLPI::Agent::Protocol::Message;
@@ -113,7 +114,6 @@ my %checks = (
         INTERFACE => qr/^(SCSI|HDC|IDE|USB|1394|SATA|SAS|ATAPI)$/
     },
     VIRTUALMACHINES => {
-        VMTYPE => qr/^(physical|xen|virtualbox|virtual machine|vmware|qemu|solaris ?zones?|vserver|openvz|bsdjail|parallels|hyperv|aix_lpar|docker|libvirt|lxd|lxc|virtuozzo|kvm|hpvm|wsl[12])$/i,
         STATUS => qr/^(running|blocked|idle|paused|shutdown|crashed|dying|off)$/
     },
     SLOTS => {
@@ -137,6 +137,7 @@ sub new {
 
     my $self = {
         deviceid       => $params{deviceid},
+        datadir        => $params{datadir},
         logger         => $params{logger} || GLPI::Agent::Logger->new(),
         fields         => \%fields,
         _format        => '',
@@ -228,7 +229,7 @@ sub getFields {
 }
 
 sub getContent {
-    my ($self) = @_;
+    my ($self, %params) = @_;
 
     if ($self->{_format} eq 'json') {
         die "Can't load GLPI Protocol Inventory library\n"
@@ -238,7 +239,7 @@ sub getContent {
             logger      => $self->{logger},
             deviceid    => $self->getDeviceId(),
             content     => $self->{content},
-            partial     => $self->{_partial},
+            partial     => $self->isPartial(),
             itemtype    => "Computer",
         );
 
@@ -247,7 +248,7 @@ sub getContent {
             if $self->{_json_merge};
 
         # Normalize content to follow inventory format specs from https://github.com/glpi-project/inventory_format
-        $content->normalize();
+        $content->normalize($params{server_version});
 
         return $content;
 
@@ -264,7 +265,7 @@ sub getContent {
 sub getSection {
     my ($self, $section) = @_;
     ## no critic (ExplicitReturnUndef)
-    my $content = $self->getContent() or return undef;
+    my $content = $self->{content} or return undef;
     return exists($content->{$section}) ? $content->{$section} : undef ;
 }
 
@@ -612,6 +613,84 @@ sub credentials {
         $index++;
         push @{$self->{_credentials}}, $hash;
     }
+}
+
+sub save {
+    my ($self, $path) = @_;
+
+    my ($handle, $file);
+    my $format = $self->getFormat();
+    unless ($format && $format =~ /^json|xml|html$/) {
+        if ($format) {
+            $self->{logger}->error("Unsupported inventory format $format, fallback on json");
+        } else {
+            $self->{logger}->info("Using json as default format");
+        }
+        $format = 'json';
+    }
+
+    if ($path eq '-') {
+        $handle = \*STDOUT;
+    } elsif (-d $path) {
+        $file = $path . "/" . $self->getDeviceId() . ".$format";
+    } else {
+        $file = $path;
+    }
+
+    if ($file) {
+        if ($OSNAME eq 'MSWin32' && Win32::Unicode::File->require()) {
+            $handle = Win32::Unicode::File->new('w', $file)
+                or $self->{logger}->error("Can't write to $file: $ERRNO");
+        } else {
+            unless (open($handle, '>', $file)) {
+                $self->{logger}->error("Can't write to $file: $ERRNO");
+                undef $handle;
+            }
+        }
+        return unless $handle;
+    }
+
+    if ($format eq 'json') {
+
+            my $json = $self->getContent();
+            print $handle $json->getContent();
+
+    } elsif ($format eq 'xml') {
+
+        my $xml = GLPI::Agent::XML->new();
+
+        print $handle $xml->write({
+            REQUEST => {
+                CONTENT  => $self->getContent(),
+                DEVICEID => $self->getDeviceId(),
+                QUERY    => "INVENTORY",
+            }
+        });
+
+    } elsif ($format eq 'html') {
+
+        binmode $handle, ':encoding(UTF-8)';
+
+        Text::Template->require();
+        my $template = Text::Template->new(
+            TYPE => 'FILE', SOURCE => "$self->{datadir}/html/inventory.tpl"
+        );
+
+        my $hash = {
+            version  => $GLPI::Agent::Version::VERSION,
+            deviceid => $self->getDeviceId(),
+            data     => $self->getContent(),
+            fields   => $self->getFields()
+        };
+
+        print $handle $template->fill_in(HASH => $hash);
+
+    } else {
+        $self->{logger}->error("Unsupported inventory format $format");
+        return 0;
+    }
+
+    return $file // $path;
 }
 
 1;

@@ -36,7 +36,7 @@ sub _parseProcessList {
     foreach my $option (@options) {
         if ($option =~ m/^(?:[fhsv]d[a-d]|cdrom) (\S+)/) {
             $values->{name} = $1 if !$values->{name};
-        } elsif ($option =~ m/^name (\S+)/) {
+        } elsif ($option =~ m/^name ([^\s,]+)/) {
             $values->{name} = $1;
         } elsif ($option =~ m/^m .*size=(\S+)/) {
             my ($mem) = split(/,/,$1);
@@ -78,8 +78,14 @@ sub doInventory {
         next if $process->{CMD} =~ /^\[/;
         next if $process->{CMD} !~ /(qemu|kvm|qemu-kvm|qemu-system\S+) .*\S/x;
 
+        # Don't inventory qemu guest agent as a virtualmachine
+        next if $process->{CMD} =~ /qemu-ga/;
+
         my $values = _parseProcessList($process);
         next unless $values;
+
+        # Name is mandatory, if we don't see it, the process is probably not related to a VM
+        next unless defined($values->{name}) && length($values->{name});
 
         $inventory->addEntry(
             section => 'VIRTUALMACHINES',

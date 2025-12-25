@@ -6,73 +6,86 @@
     <link rel="stylesheet" href="site.css" type="text/css" />
 </head>
 <body>
-<div id="background">
-<br />
-<br />
-This is GLPI Agent {$version}<br />
-The current status is {$status}<br />
+  <div id='background'>
+    <p id='version' class='block'>This is GLPI Agent {$version}</p>
+    <div id='status'>
+      <p>The current status is {$status}</p>
+      <div id='force' class='block'>{
+    $OUT .= $trust && (@server_targets || @local_targets) ? "
+        <a href='/now'>Force an Inventory</a>" : "";
+  }
+      </div>
+    </div>{
 
-{
-    if ($trust && (@server_targets||@local_targets)) {
-        $OUT .= '<a href="/now">Force an Inventory</a>';
-    } else {
-        '';
-    }
-}
-
-<br />
-{
+  if (@server_targets || @local_targets || @httpd_plugins || @sessions) {
+    $OUT .= "
+    <div id='sections' class='section'>";
     if (@server_targets) {
-        $OUT .=  "Next server target execution planned for:\n";
-        $OUT .=  "<ul>\n";
-        foreach my $target (@server_targets) {
-           $OUT .= "<li>$target->{name}: $target->{date}</li>\n";
-        }
-        $OUT .=  "</ul>\n";
-    } else {
-        '';
+      $OUT .= "
+      <div id='servers'>
+        <p>Next server target execution planned for:</p>
+        <ul>";
+      foreach my $target (@server_targets) {
+        $OUT .= "
+          <li>".($target->{target} ? "<a href='$target->{target}' target='_blank'>$target->{id}</a>" : $target->{id}).": $target->{date}</li>";
+      }
+      $OUT .= "
+        </ul>
+      </div>";
     }
-}
 
-{
     if (@local_targets) {
-        $OUT .=  "Next local target execution planned for:\n";
-        $OUT .=  "<ul>\n";
-        foreach my $target (@local_targets) {
-           $OUT .= "<li>$target->{name}: $target->{date}</li>\n";
-        }
-        $OUT .=  "</ul>\n";
-    } else {
-        '';
+      $OUT .= "
+      <div id='locals'>
+        <p>Next local target execution planned for:</p>
+        <ul>";
+      foreach my $target (@local_targets) {
+        $OUT .= "
+          <li>$target->{id}: $target->{date}".($target->{target} ? "<br/>folder: <tt>$target->{target}</tt>" : "")."</li>";
+      }
+      $OUT .= "
+        </ul>
+      </div>";
     }
-}
 
-{
-    if ($trust && @httpd_plugins) {
-        $OUT .=  "HTTPD plugins listening ports:\n";
-        foreach my $plugin (@httpd_plugins) {
-           $OUT .= "<li>$plugin->{port}: $plugin->{name}</li>\n";
-        }
-        $OUT .=  "</ul>\n";
-    } else {
-        '';
+    if (@httpd_plugins) {
+      $OUT .= "
+      <div id='plugins'>
+        <p>HTTPD plugins listening ports:</p>
+        <ul>";
+      foreach my $plugin (@httpd_plugins) {
+        my $url = $plugins_url{$plugin->{name}};
+        $OUT .= "
+          <li>$plugin->{port}: ";
+        $OUT .= "<a href='$url'>" if $url;
+        $OUT .= $plugin->{name};
+        $OUT .= "</a>" if $url;
+        $OUT .= "</li>";
+      }
+      $OUT .= "
+        </ul>
+      </div>";
     }
-}
 
-<br />{
     if (@sessions) {
-        my $style = "text-align: left; font-size: 8px;";
-        $OUT .= "<div class='sessions'>\n";
-        $OUT .= "Current HTTP client sessions:\n";
-        $OUT .= "<ul>\n";
-        foreach my $session (@sessions) {
-           $OUT .= "    <li class='sessions'>$session</li>\n";
-        }
-        $OUT .= "</ul>\n</div>\n";
-    } else {
-        '';
+      $OUT .= "
+      <div id='sessions' class='sessions'>
+        <p>Current HTTP client sessions:</p>
+        <ul>";
+      foreach my $session (@sessions) {
+        $OUT .= "
+          <li>$session</li>";
+      }
+      $OUT .= "
+        </ul>
+      </div>";
     }
+    $OUT .= "
+    </div>";
+  } else {
+    '';
+  }
 }
-</div>
+  </div>
 </body>
 </html>

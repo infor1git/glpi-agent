@@ -87,6 +87,10 @@ Linux installer for redhat/centos/debian/ubuntu, including snap install support|
 
 [glpi-agent_${VERSION}_amd64.snap](glpi-agent_${VERSION}_amd64.snap)
 
+### AppImage Linux installer for x86-64
+
+[glpi-agent-${VERSION}-x86_64.AppImage](glpi-agent-${VERSION}-x86_64.AppImage)
+
 ### Debian/Ubuntu packages
 
 Better use [glpi-agent-${VERSION}-linux-installer.pl](glpi-agent-${VERSION}-linux-installer.pl) when possible.
@@ -112,6 +116,10 @@ Collect | [glpi-agent-task-collect-${VERSION}.noarch.rpm](glpi-agent-task-collec
 Deploy | [glpi-agent-task-deploy-${VERSION}.noarch.rpm](glpi-agent-task-deploy-${VERSION}.noarch.rpm)
 WakeOnLan | [glpi-agent-task-wakeonlan-${VERSION}.noarch.rpm](glpi-agent-task-wakeonlan-${VERSION}.noarch.rpm)
 Cron | [glpi-agent-cron-${VERSION}.noarch.rpm](glpi-agent-cron-${VERSION}.noarch.rpm)
+
+## Sources <a href="#sources-${VERSION//./-}">#</a> {#sources-${VERSION//./-}}
+
+[GLPI-Agent-${VERSION}.tar.gz](GLPI-Agent-${VERSION}.tar.gz)
 
 <p><a href='#content'>Back to top</a></p>
 ---

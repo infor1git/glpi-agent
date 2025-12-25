@@ -2764,7 +2764,7 @@ my %netstat_tests = (
     },
     hpux1 => {
         '10.0.4.55' => '10.0.4.55',
-        '10.0.4.32' => '10.0.4.55',
+        '10.0.4.32' => '10.0.4.56',
         '127.0.0.0' => '127.0.0.1',
         '127.0.0.1' => '127.0.0.1',
         '10.0.4.56' => '10.0.4.56',
@@ -2775,7 +2775,7 @@ my %netstat_tests = (
         '192.168.210.0'  => '192.168.210.40',
         '10.0.0.48'      => '10.0.0.48',
         'default'        => '10.0.0.33',
-        '10.0.0.32'      => '10.0.0.49',
+        '10.0.0.32'      => '10.0.0.48',
         '10.0.0.49'      => '10.0.0.49',
         '192.168.210.40' => '192.168.210.40',
         '127.0.0.1'      => '127.0.0.1',
@@ -2784,7 +2784,7 @@ my %netstat_tests = (
     'aix-5.3a' => {
         '192.168.2.1'   => '127.0.0.1',
         '192.168.2.0'   => '192.168.2.1',
-        'default'       => '192.168.2.250',
+        'default'       => '192.168.2.254',
         '192.168.2/24'  => '192.168.2.1',
         '192.168.2.255' => '192.168.2.1',
         '127/8'         => '127.0.0.1'
@@ -2869,12 +2869,17 @@ my %mount_tests = (
     freebsd => [ qw/ufs/ ]
 );
 
+my %rootfsbirth = (
+    'old-fedora'    => "2013-12-22 22:47:33",
+);
+
 plan tests =>
     (scalar keys %df_tests)         +
     (scalar keys %busybox_ps_tests) +
     (scalar keys %other_ps_tests)   +
     (scalar keys %netstat_tests)    +
     (scalar keys %mount_tests)      +
+    (scalar keys %rootfsbirth)      +
     (scalar @dhcp_leases_test);
 
 foreach my $test (keys %df_tests) {
@@ -2914,4 +2919,10 @@ foreach my $test (keys %mount_tests) {
     my $file = "resources/generic/mount/$test";
     my @types = getFilesystemsTypesFromMount(file => $file);
     cmp_deeply(\@types, $mount_tests{$test}, $test);
+}
+
+foreach my $test (keys %rootfsbirth) {
+    my $file = "resources/generic/stat/$test";
+    my $installdate = GLPI::Agent::Tools::Unix::getRootFSBirth(file => $file);
+    is($installdate, $rootfsbirth{$test}, "$test installdate");
 }

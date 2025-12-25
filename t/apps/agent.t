@@ -7,9 +7,9 @@ use lib 't/lib';
 use English qw(-no_match_vars);
 use File::Temp;
 use Test::More;
-use XML::TreePP;
 
 use GLPI::Agent::Tools;
+use GLPI::Agent::XML;
 use GLPI::Test::Utils;
 use GLPI::Agent::Version;
 
@@ -282,10 +282,10 @@ sub check_content_ok {
 
     like(
         $out,
-        qr/^<\?xml version="1.0" encoding="UTF-8" \?>/,
+        qr/^<\?xml version="1.0" encoding="UTF-8"\s*\?>/,
         'output has correct encoding'
     );
 
-    $content = XML::TreePP->new()->parse($out);
+    $content = GLPI::Agent::XML->new(string => $out)->dump_as_hash();
     ok($content, 'output is valid XML');
 }

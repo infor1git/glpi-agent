@@ -3,21 +3,28 @@
 use strict;
 use warnings;
 
+use lib './lib';
+use setup;
+
 use Compress::Zlib;
 use English qw(-no_match_vars);
 use Fcntl qw(:flock);
 use Getopt::Long;
 use LWP::UserAgent;
 use Pod::Usage;
-use XML::TreePP;
-use JSON;
+use Cpanel::JSON::XS;
 use Data::UUID;
+
+use GLPI::Agent::XML;
 
 my $options = {
     useragent => 'GLPI-Injector'
 };
 
 my @failedFiles;
+
+# Set bundling to support aggregated options. It also make single char options case sensitive.
+Getopt::Long::Configure("bundling");
 
 GetOptions(
     $options,
@@ -26,6 +33,8 @@ GetOptions(
     'recursive|R',
     'file|f=s',
     'no-ssl-check',
+    'ssl-cert-file=s',
+    'proxy|P=s',
     'url|u=s',
     'useragent=s',
     'remove|r',
@@ -104,7 +113,7 @@ sub loaddirectory {
     opendir (my $handle, $directory)
         or die "can't open directory $directory: $ERRNO\n";
     foreach my $file (sort readdir($handle)) {
-        next if $file =~ /^..?$/ ;
+        next if $file =~ /^\.\.?$/ ;
         if (-d "$directory/$file") {
             loaddirectory("$directory/$file") if ($options->{recursive});
         } else {
@@ -130,18 +139,16 @@ sub sendContent {
         $content = uncompress($content);
     }
 
-    if ($content =~ /^<\?xml/) {
-        undef $agentid;
-        if ($options->{"xml-ua"}) {
-            my $tpp = XML::TreePP->new();
-            my $tree = $tpp->parse( $content );
+    if ($options->{"xml-ua"} || $options->{"json-ua"}) {
+        if ($content =~ /^<\?xml/) {
+            undef $agentid;
+            my $xml = GLPI::Agent::XML->new(string => $content);
+            my $tree = $xml->dump_as_hash();
             $useragent = $tree->{REQUEST}->{CONTENT}->{VERSIONCLIENT}
                 if $tree && $tree->{REQUEST} && $tree->{REQUEST}->{CONTENT} &&
                     $tree->{REQUEST}->{CONTENT}->{VERSIONCLIENT};
-        }
-    } elsif ($agentid || $content =~ /^{/) {
-        $agentid = newagentid() unless $agentid;
-        if ($options->{"xml-ua"} || $options->{"json-ua"}) {
+        } elsif ($agentid || $content =~ /^{/) {
+            $agentid = newagentid() unless $agentid;
             my $json = decode_json($content);
             $useragent = $json->{content}->{versionclient}
                 if $json && $json->{content} && $json->{content}->{versionclient};
@@ -154,15 +161,29 @@ sub sendContent {
         keep_alive => 1,
         requests_redirectable => ['POST', 'GET', 'HEAD']
     );
+
+    # Support proxy setup
+    if ($options->{proxy}) {
+        $ua->proxy(['http', 'https'], $options->{proxy});
+    }  else {
+        $ua->env_proxy();
+    }
+
     my $request = HTTP::Request->new( POST => $options->{url} );
 
     my $info = "";
-    if ($options->{"no-ssl-check"}) {
+    if ($options->{"no-ssl-check"} || $options->{"ssl-cert-file"}) {
         my $url = $request->uri();
         if ($url->scheme() eq 'https') {
             if ($ua->can('ssl_opts')) {
-                $ua->ssl_opts(verify_hostname => 0, SSL_verify_mode => 0);
-                $info = " (ssl check disabled)";
+                IO::Socket::SSL->require();
+                if ($options->{"no-ssl-check"}) {
+                    $ua->ssl_opts(verify_hostname => 0, SSL_verify_mode => 0);
+                    $info = " (ssl check disabled)";
+                } elsif ($options->{"ssl-cert-file"}) {
+                    $ua->ssl_opts(SSL_cert_file => $options->{"ssl-cert-file"});
+                    $info = " (ssl cert file)";
+                }
             } else {
                 $info = " (unsupported ssl options)";
             }
@@ -193,9 +214,13 @@ sub sendContent {
     my $error;
     eval {
         $content = $res->content;
-        $content = uncompress($content) if $res->header('Content-type') =~ /x-compress-zlib/;
-        my $tpp = XML::TreePP->new();
-        my $tree = $tpp->parse($content);
+        if ($res->header('Content-type') =~ /x-compress-zlib/) {
+            print "DEBUG: Uncompressing received content\n" if $options->{debug};
+            $content = uncompress($content);
+        }
+        my $xml = GLPI::Agent::XML->new(string => $content);
+        my $tree = $xml->dump_as_hash()
+            or die "Not an XML\n";
         $error = $tree->{REPLY}->{ERROR}
             if ref($tree->{REPLY}) eq 'HASH' && exists($tree->{REPLY}->{ERROR});
     };
@@ -208,9 +233,32 @@ sub sendContent {
                 if ($json->{status} eq "error") {
                     $error = $json->{message} // "Server failed to import" .
                         ($options->{debug} ? "" : ", use --debug option to debug");
-                } elsif ($json->{status} eq "pending") {
-                    # TODO Handle proxy
-                    print "proxy processing... ";
+                } elsif ($json->{status} eq "pending" && $res->header('GLPI-Request-ID')) {
+                    print "DEBUG, CONTENT: $content\n" if defined($content) && $options->{debug};
+                    print "waiting for proxy, ";
+                    # Next request should be a GET with expected RequestID and no content
+                    $request->method("GET");
+                    $request->content("");
+                    $request->header("GLPI-Request-ID" => $res->header('GLPI-Request-ID'));
+                    my $max_pending_request = 12;
+                    while ($max_pending_request--) {
+                        my $expiration = $json->{expiration} // "";
+                        if ($expiration =~ /^(\d+)s$/ && $1) {
+                            print "waiting $1s... ";
+                            sleep $1;
+                        }
+                        $res = $ua->request($request);
+                        $content = $res->content;
+                        print "DEBUG, CONTENT: $content\n" if defined($content) && $options->{debug};
+                        $json = decode_json($content);
+                    }
+                    if ($json->{status} eq "pending") {
+                        print "failed to get final proxy answer";
+                    } elsif ($json->{status} ne "ok") {
+                        $error = $json->{message} // "Server failed to import" .
+                            ($options->{debug} ? "" : ", use --debug option to debug");
+                    }
+                    undef $content;
                 } elsif ($json->{status} ne "ok") {
                     $error = $json->{message} // "Server failed to import" .
                         ($options->{debug} ? "" : ", use --debug option to debug");
@@ -227,12 +275,16 @@ sub sendContent {
     }
 
     if ($options->{verbose} || $error) {
-        print $error           ? "ERROR: $error" :
-            $res->is_success() ? "OK"            :
-                                 "ERROR: ".$res->status_line(), "$info\n";
+        if ($res->is_success()) {
+            print "OK\n";
+        } elsif ($error) {
+            # Chomp seems inefficient on multi-lined strings
+            chop($error) if $error =~ /\n$/m;
+            print "ERROR$info: ".$res->status_line().", $error\n";
+        }
     }
 
-    print "DEBUG: $content\n" if $options->{debug};
+    print "DEBUG: $content\n" if $content && $options->{debug};
 
     return $res->is_success() && ! $error ;
 }
@@ -245,12 +297,15 @@ glpi-injector - A tool to push inventory in an OCS Inventory or compatible serve
 
 =head1 SYNOPSIS
 
-glpi-injector [options] [--file <file>|--directory <directory>|--stdin|--useragent <user-agent>]
+glpi-injector [-h|--help] [-R|--recursive] [-r|--remove] [-v|--verbose] [--debug]
+    [--useragent <user-agent>|-x|--xml-ua|--json-ua] [-C|--no-compression]
+    [--no-ssl-check] [--ssl-cert-file <private certificate file>] [[-P|--proxy] <proxy url>]
+    [[-f|--file] <file>|[-d|--directory] <directory>|--stdin] [-u|--url] <url>
 
   Options:
     -h --help      this menu
-    -d --directory load every .ocs files from a directory
-    -R --recursive recursively load .ocs files from <directory>
+    -d --directory load every inventory files from a directory
+    -R --recursive recursively load inventory files from <directory>
     -f --file      load a specific file
     -u --url       server URL
     -r --remove    remove succesfuly injected files
@@ -258,14 +313,16 @@ glpi-injector [options] [--file <file>|--directory <directory>|--stdin|--userage
     --debug        debug mode to output server answer
     --stdin        read data from STDIN
     --useragent    set used HTTP User-Agent for POST
-    -x --xml-ua    use Client version found in XML as User-Agent for POST
-    -x --json-ua   use Client version found in JSON as User-Agent for POST
+    -x --xml-ua --json-ua
+                   use Client version found in XML or JSON as User-Agent for POST
     --no-ssl-check do not check server SSL certificate
+    --ssl-cert-file client certificate file
     -C --no-compression don't compress sent XML inventories
+    -P --proxy=PROXY proxy address
 
   Examples:
-    glpi-injector -v -f /tmp/toto-2010-09-10-11-42-22.ocs --url https://login:pw@example/front/inventory.php
-    glpi-injector -v -R -d /srv/ftp/fusion --url https://login:pw@example/front/inventory.php
+    glpi-injector -v -f /tmp/toto-2010-09-10-11-42-22.json --url https://login:pw@example/
+    glpi-injector -v -R -d /srv/ftp/fusion --url https://login:pw@example/
 
 =head1 DESCRIPTION
 

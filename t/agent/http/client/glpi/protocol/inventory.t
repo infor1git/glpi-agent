@@ -8,7 +8,7 @@ use English qw(-no_match_vars);
 use Test::Deep;
 use Test::Exception;
 use Test::More;
-use JSON;
+use Cpanel::JSON::XS;
 
 use GLPI::Agent::Logger;
 use GLPI::Agent::Version;
@@ -90,7 +90,7 @@ my %inventories = (
             itemtype    => "Computer",
             content     => {
                 antivirus   => {
-                    enabled => $JSON::true,
+                    enabled => $Cpanel::JSON::XS::true,
                 }
             }
         },
@@ -109,7 +109,7 @@ my %inventories = (
             itemtype    => "Computer",
             content     => {
                 antivirus   => {
-                    enabled     => $JSON::true,
+                    enabled     => $Cpanel::JSON::XS::true,
                     expiration  => "2021-06-25",
                 }
             }
@@ -129,7 +129,7 @@ my %inventories = (
             itemtype    => "Computer",
             content     => {
                 antivirus   => {
-                    enabled     => $JSON::false,
+                    enabled     => $Cpanel::JSON::XS::false,
                     expiration  => "2021-06-25",
                 }
             }
@@ -149,7 +149,7 @@ my %inventories = (
             itemtype    => "Computer",
             content     => {
                 antivirus   => {
-                    enabled     => $JSON::true,
+                    enabled     => $Cpanel::JSON::XS::true,
                 }
             }
         },
@@ -158,8 +158,10 @@ my %inventories = (
     "process" => {
         content     => {
             PROCESSES   => {
-                STARTED => "0000-00-00 00:00",
+                CMD     => "init",
+                STARTED => "2021-12-10 00:00",
                 PID     => "001",
+                USER    => "root",
             }
         },
         expected    => {
@@ -168,8 +170,10 @@ my %inventories = (
             itemtype    => "Computer",
             content     => {
                 processes   => {
-                    started => "0000-00-00 00:00:00",
+                    cmd     => "init",
+                    started => "2021-12-10 00:00:00",
                     pid     => 1,
+                    user    => "root"
                 }
             }
         },
@@ -178,8 +182,10 @@ my %inventories = (
     "process with date" => {
         content     => {
             PROCESSES   => {
+                CMD     => "init",
                 STARTED => "25/06/2021",
                 PID     => "001",
+                USER    => "root",
             }
         },
         expected    => {
@@ -188,8 +194,10 @@ my %inventories = (
             itemtype    => "Computer",
             content     => {
                 processes   => {
+                    cmd     => "init",
                     started => "2021-06-25 00:00:00",
                     pid     => 1,
+                    user    => "root"
                 }
             }
         },
@@ -198,8 +206,10 @@ my %inventories = (
     "process and wrong dateordatetime" => {
         content     => {
             PROCESSES   => {
+                CMD     => "init",
                 STARTED => "at boot",
                 PID     => "001",
+                USER    => "root",
             }
         },
         expected    => {
@@ -208,7 +218,9 @@ my %inventories = (
             itemtype    => "Computer",
             content     => {
                 processes   => {
+                    cmd     => "init",
                     pid     => 1,
+                    user    => "root"
                 }
             }
         },
@@ -236,12 +248,13 @@ my %inventories = (
         },
         itemtype    => "Computer",
     },
-    "vm" => {
+    "vm-down" => {
         content     => {
             VIRTUALMACHINES => {
                 VCPU    => "16",
                 NAME    => "Glpi",
-                STATUS  => "Down"
+                VMTYPE  => "lxc",
+                STATUS  => "Down" # Not supported status
             }
         },
         expected    => {
@@ -252,7 +265,7 @@ my %inventories = (
                 virtualmachines => {
                     vcpu    => 16,
                     name    => "Glpi",
-                    status  => "down",
+                    vmtype  => "lxc"
                 }
             }
         },
@@ -261,16 +274,19 @@ my %inventories = (
     "vms and one with undefined memory" => {
         content     => {
             VIRTUALMACHINES => [
-            {
-                VCPU    => "16",
-                NAME    => "Glpi",
-                STATUS  => "Down"
-            },{
-                VCPU    => "0032",
-                NAME    => "Glpi32",
-                STATUS  => "UP",
-                MEMORY  => undef
-            }]
+                {
+                    VCPU    => "16",
+                    NAME    => "Glpi",
+                    VMTYPE  => "lxc",
+                    STATUS  => "Off"
+                },{
+                    VCPU    => "0032",
+                    NAME    => "Glpi32",
+                    VMTYPE  => "lxc",
+                    STATUS  => "Running",
+                    MEMORY  => undef
+                }
+            ]
         },
         expected    => {
             action      => "inventory",
@@ -278,15 +294,18 @@ my %inventories = (
             itemtype    => "Computer",
             content     => {
                 virtualmachines => [
-                {
-                    vcpu    => 16,
-                    name    => "Glpi",
-                    status  => "down",
-                },{
-                    vcpu    => 32,
-                    name    => "Glpi32",
-                    status  => "up",
-                }]
+                    {
+                        vcpu    => 16,
+                        name    => "Glpi",
+                        vmtype  => "lxc",
+                        status  => "off",
+                    },{
+                        vcpu    => 32,
+                        name    => "Glpi32",
+                        vmtype  => "lxc",
+                        status  => "running",
+                    }
+                ]
             }
         },
         itemtype    => "Computer",
@@ -322,7 +341,7 @@ lives_ok {
 
 my $decoded_content;
 lives_ok {
-    $decoded_content = JSON::decode_json($content);
+    $decoded_content = Cpanel::JSON::XS::decode_json($content);
 } "Inventory request: content must be a JSON";
 
 my $expected_content = {
@@ -348,7 +367,7 @@ foreach my $case (keys(%inventories)) {
         $inventory->normalize();
     } "$case inventory";
     cmp_deeply(
-        JSON::decode_json($inventory->getContent()),
+        Cpanel::JSON::XS::decode_json($inventory->getContent()),
         $expected,
         "$case inventory message check"
     );

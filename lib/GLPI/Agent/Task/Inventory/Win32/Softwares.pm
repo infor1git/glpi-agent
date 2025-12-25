@@ -5,8 +5,6 @@ use warnings;
 
 use parent 'GLPI::Agent::Task::Inventory::Module';
 
-use File::Basename;
-
 use GLPI::Agent::Tools;
 use GLPI::Agent::Tools::Win32;
 use GLPI::Agent::Tools::Win32::Constants;
@@ -14,6 +12,7 @@ use GLPI::Agent::Tools::Win32::Constants;
 use constant    category    => "software";
 
 my $seen = {};
+my $remoteInventory;
 
 sub isEnabled {
     return 1;
@@ -24,6 +23,8 @@ sub doInventory {
 
     my $inventory = $params{inventory};
     my $logger    = $params{logger};
+
+    $remoteInventory = $inventory->getRemote();
 
     my $is64bit = is64bit();
 
@@ -37,9 +38,13 @@ sub doInventory {
         is64bit   => $is64bit
     );
 
+    my $userprofiles;
     if ($params{scan_profiles}) {
+        GLPI::Agent::Tools::Win32::Users->require();
+        $userprofiles = [ GLPI::Agent::Tools::Win32::Users::getSystemUserProfiles() ];
         _loadUserSoftware(
             inventory => $inventory,
+            profiles  => $userprofiles,
             is64bit   => $is64bit,
             logger    => $logger
         );
@@ -66,10 +71,15 @@ sub doInventory {
 
         _loadUserSoftware(
             inventory => $inventory,
+            profiles  => $userprofiles,
             is64bit   => 0,
             logger    => $logger
         ) if $params{scan_profiles};
     }
+
+    # Cleanup privileges if we had to load user profiles
+    GLPI::Agent::Tools::Win32::cleanupPrivileges()
+        if $params{scan_profiles};
 
     my $hotfixes = _getHotfixesList(is64bit => $is64bit);
     foreach my $hotfix (@$hotfixes) {
@@ -103,18 +113,28 @@ sub doInventory {
 sub _loadUserSoftware {
     my (%params) = @_;
 
-    my $userList = _getUsersFromRegistry(%params);
-    return unless $userList;
+    return unless $params{profiles};
 
     my $inventory = $params{inventory};
     my $is64bit   = $params{is64bit};
     my $logger    = $params{logger};
 
-    foreach my $profileName (keys %$userList) {
-        my $userName = $userList->{$profileName}
+    foreach my $profile (@{$params{profiles}}) {
+        my $sid = $profile->{SID}
+            or next;
+        my ($userid) = $sid =~ /-(\d+)$/;
+
+        my $userhive;
+        unless ($profile->{LOADED}) {
+            my $ntuserdat = $profile->{PATH}."/NTUSER.DAT";
+            # This call involves we use cleanupPrivileges before leaving
+            $userhive = loadUserHive(sid => $sid, file => $ntuserdat);
+        }
+
+        my $username = GLPI::Agent::Tools::Win32::Users::getProfileUsername($profile)
             or next;
 
-        my $profileSoft = "HKEY_USERS/$profileName/SOFTWARE/";
+        my $profileSoft = "HKEY_USERS/$sid/SOFTWARE/";
         $profileSoft .= is64bit() && !$is64bit ?
                 "Wow6432Node/Microsoft/Windows/CurrentVersion/Uninstall" :
                 "Microsoft/Windows/CurrentVersion/Uninstall";
@@ -122,44 +142,16 @@ sub _loadUserSoftware {
         my $softwares = _getSoftwaresList(
             path      => $profileSoft,
             is64bit   => $is64bit,
-            userid    => $profileName,
-            username  => $userName
+            userid    => $userid,
+            username  => $username
         ) || [];
         next unless @$softwares;
         my $nbUsers = scalar(@$softwares);
-        $logger->debug2('_loadUserSoftwareFromHKey_Users() : add of ' . $nbUsers . ' softwares in inventory');
+        $logger->debug2('_loadUserSoftwareFromHKey_Users('.$sid.') : add of ' . $nbUsers . ' softwares in inventory');
         foreach my $software (@$softwares) {
             _addSoftware(inventory => $inventory, entry => $software);
         }
     }
-}
-
-sub _getUsersFromRegistry {
-    my (%params) = @_;
-
-    my $profileList = getRegistryKey(
-        path => 'HKEY_LOCAL_MACHINE/SOFTWARE/Microsoft/Windows NT/CurrentVersion/ProfileList',
-        # Important for remote inventory optimization
-        required    => [ qw/ProfileImagePath Sid/ ],
-    );
-
-    next unless $profileList;
-
-    my $userList;
-    foreach my $profileName (keys %$profileList) {
-        next unless $profileName =~ m{/$};
-        next unless length($profileName) > 10;
-
-        my $profilePath = $profileList->{$profileName}{'/ProfileImagePath'};
-        my $sid = $profileList->{$profileName}{'/Sid'};
-        next unless $sid;
-        next unless $profilePath;
-        my $user = basename($profilePath);
-        $profileName =~ s|/$||;
-        $userList->{$profileName} = $user;
-    }
-
-    return $userList;
 }
 
 sub _dateFormat {
@@ -186,6 +178,8 @@ sub _dateFormat {
 
 sub _keyLastWriteDateString {
     my ($key) = @_;
+
+    return if $remoteInventory;
 
     return unless OSNAME eq 'MSWin32';
 
@@ -217,41 +211,52 @@ sub _getSoftwaresList {
 
     return unless $softwares;
 
-    foreach my $rawGuid (keys %$softwares) {
-        # skip variables
-        next if $rawGuid =~ m{^/};
+    my %mapping = qw(
+        NAME                DisplayName
+        COMMENTS            Comments
+        HELPLINK            HelpLink
+        RELEASE_TYPE        ReleaseType
+        VERSION             DisplayVersion
+        PUBLISHER           Publisher
+        URL_INFO_ABOUT      URLInfoAbout
+        UNINSTALL_STRING    UninstallString
+    );
 
+    my @subKeys = map { /^(.*)\/$/ } grep { m{/$} } keys(%{$softwares})
+        or return;
+    foreach my $guid (@subKeys) {
         # only keep subkeys with more than 1 value
-        my $data = $softwares->{$rawGuid};
-        next unless keys %$data > 1;
-
-        my $guid = encodeFromRegistry($rawGuid);
-        $guid =~ s/\/$//; # drop the tailing /
+        my $data = $softwares->{$guid."/"}
+            or next;
+        my %infos = $remoteInventory ? () : $data->Information;
+        # Just to support related test & remoteinventory
+        %infos = ( CntValues => scalar(grep { /^\// } keys(%{$data})) )
+            unless exists($infos{CntValues});
+        next unless $infos{CntValues} > 1;
 
         my $software = {
             FROM             => "registry",
-            NAME             => encodeFromRegistry($data->{'/DisplayName'}) ||
-                                $guid, # folder name
-            COMMENTS         => encodeFromRegistry($data->{'/Comments'}),
-            HELPLINK         => encodeFromRegistry($data->{'/HelpLink'}),
-            RELEASE_TYPE     => encodeFromRegistry($data->{'/ReleaseType'}),
-            VERSION          => encodeFromRegistry($data->{'/DisplayVersion'}),
-            PUBLISHER        => encodeFromRegistry($data->{'/Publisher'}),
-            URL_INFO_ABOUT   => encodeFromRegistry($data->{'/URLInfoAbout'}),
-            UNINSTALL_STRING => encodeFromRegistry($data->{'/UninstallString'}),
+            NAME             => $guid, # subkey name as default
             INSTALLDATE      => _dateFormat($data->{'/InstallDate'}),
             VERSION_MINOR    => hex2dec($data->{'/MinorVersion'}),
             VERSION_MAJOR    => hex2dec($data->{'/MajorVersion'}),
             NO_REMOVE        => hex2dec($data->{'/NoRemove'}),
             ARCH             => $params{is64bit} ? 'x86_64' : 'i586',
             GUID             => $guid,
-            USERNAME         => $params{username},
-            USERID           => $params{userid},
             SYSTEM_CATEGORY  => $data->{'/SystemComponent'} && hex2dec($data->{'/SystemComponent'}) ?
                 CATEGORY_SYSTEM_COMPONENT : CATEGORY_APPLICATION
         };
 
-        # Workaround for #415
+        foreach my $key (keys(%mapping)) {
+            my $value = getRegistryKeyValue($data, $mapping{$key})
+                or next;
+            $software->{$key} = $value;
+        }
+
+        $software->{USERID} = $params{userid} if $params{userid};
+        $software->{USERNAME} = $params{username} if $params{username};
+
+        # Workaround for #415 (may be no more useful since using getRegistryKeyValue() api)
         $software->{VERSION} =~ s/[\000-\037].*// if $software->{VERSION};
 
         # Set install date to last registry key update time
@@ -426,6 +431,7 @@ sub _appxscript {
         next if length($line) == 0 || $line =~ /^#/;
         $script .= $line;
     }
+    close(DATA);
     return $script;
 }
 

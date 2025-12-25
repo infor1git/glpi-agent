@@ -19,6 +19,10 @@ use GLPI::Agent::Version;
 use GLPI::Agent::Logger;
 use GLPI::Agent::Tools;
 use GLPI::Agent::Tools::Network;
+use GLPI::Agent::Event;
+
+# Expire trusted ip/ranges cache after a minute
+use constant TRUSTED_CACHE_TIMEOUT => 60;
 
 # Limit maximum requests number handled in a keep-alive connection
 use constant MaxKeepAlive => 8;
@@ -39,7 +43,7 @@ sub new {
     };
     bless $self, $class;
 
-    $self->setTrustedAddresses(%params);
+    $self->_handleTrustedAddressesCache($params{trust});
 
     # Load any Server sub-module as plugin
     my @plugins = ();
@@ -73,9 +77,8 @@ sub new {
             $self->{logger}->debug($log_prefix . "HTTPD $name Server plugin loaded but disabled");
         } else {
             $self->{logger}->info($log_prefix . "HTTPD $name Server plugin loaded");
+            push @plugins, $plugin;
         }
-
-        push @plugins, $plugin;
     }
 
     # Sort and store loaded plugins
@@ -86,25 +89,67 @@ sub new {
     return $self;
 }
 
-sub setTrustedAddresses {
-    my ($self, %params) = @_;
+sub _handleTrustedAddressesCache {
+    my ($self, $trust) = @_;
+
+    # Initialize trusted cache or check expiration
+    if ($trust) {
+        $self->{trusted_cache_trust} = $trust;
+    } else {
+        # No cache needed unless it has been initialized with some trusted ip or range
+        # But log untrusted during re-init
+        return $self->_log_untrusted(delete $self->{trust})
+            unless $self->{trusted_cache_trust};
+        # Check cache expirarion
+        return unless time > $self->{trusted_cache_expiration};
+        $trust = $self->{trusted_cache_trust};
+    }
+
+    # Always reset trust adresses
+    my $delete = delete $self->{trust} // {};
 
     # compute addresses allowed for push requests
     foreach my $target ($self->{agent}->getTargets()) {
         next unless $target->isType('server');
         my $url  = $target->getUrl();
         my $host = URI->new($url)->host();
-        my @addresses = compile($host, $self->{logger});
-        $self->{trust}->{$url} = \@addresses;
+        # Don't resolv server address if still found
+        next if $self->{trust}->{$host};
+        my @addresses = compile($host, $self->{logger})
+            or next;
+        $self->{trust}->{$host} = \@addresses;
         $self->{logger}->debug("Trusted target ip: ".join(", ",map { $_->print() } @addresses));
+        # Forget previous definition
+        delete $delete->{$host};
     }
-    if ($params{trust}) {
-        foreach my $string (@{$params{trust}}) {
-            my @addresses = compile($string, $self->{logger})
-                or next;
-            $self->{trust}->{$string} = \@addresses;
-            $self->{logger}->debug("Trusted client ip: ".join(", ",map { $_->print() } @addresses));
-        }
+
+    # Add addresses and ranges defined by httpd-trust option
+    foreach my $string (@{$trust}) {
+        # Don't resolv server address if still found
+        next if $self->{trust}->{$string};
+        my @addresses = compile($string, $self->{logger})
+            or next;
+        $self->{trust}->{$string} = \@addresses;
+        $self->{logger}->debug("Trusted client ip/range: ".join(", ",map { $_->print() } @addresses));
+        # Forget previous definition
+        delete $delete->{$string};
+    }
+
+    # Log lost trust
+    $self->_log_untrusted($delete);
+
+    # Define cache expiration
+    $self->{trusted_cache_expiration} = time + TRUSTED_CACHE_TIMEOUT;
+}
+
+sub _log_untrusted {
+    my ($self, $delete) = shift;
+
+    return unless ref($delete) eq 'HASH';
+
+    # Log lost trust
+    foreach my $string (keys(%{$delete})) {
+        $self->{logger}->debug("'$string' client no more trusted");
     }
 }
 
@@ -134,6 +179,15 @@ sub _handle {
             last SWITCH;
         }
 
+        # static content request
+        if ($path =~ m{^/(logo\.png|site\.css|favicon\.ico)$}) {
+            my $file = $1;
+            last SWITCH if $method ne 'GET';
+            $client->send_file_response("$self->{htmldir}/$file");
+            $status = 200;
+            last SWITCH;
+        }
+
         # deploy request
         if ($path =~ m{^/deploy/getFile/./../([\w\d/-]+)$}) {
             last SWITCH if $method ne 'GET';
@@ -147,6 +201,12 @@ sub _handle {
             if ($plugin->urlMatch($path)) {
                 undef $error_400;
                 last SWITCH unless $plugin->supported_method($method);
+                # Only support trusted client if required
+                if ($plugin->forbid_not_trusted() && !$self->_isTrusted($clientIp)) {
+                    $status = 403;
+                    $client->send_error(403);
+                    last SWITCH;
+                }
                 $status = $plugin->handle($client, $request, $clientIp);
                 last SWITCH if $status;
             }
@@ -154,7 +214,7 @@ sub _handle {
 
         # now request
         if ($path =~ m{^/now(?:/\S*)?$}) {
-            last SWITCH if $method ne 'GET';
+            last SWITCH if $method ne 'GET' && $method ne 'OPTIONS';
             $status = $self->_handle_now($client, $request, $clientIp);
             last SWITCH;
         }
@@ -163,15 +223,6 @@ sub _handle {
         if ($path eq '/status') {
             last SWITCH if $method ne 'GET';
             $status = $self->_handle_status($client, $request, $clientIp);
-            last SWITCH;
-        }
-
-        # static content request
-        if ($path =~ m{^/(logo.png|site.css|favicon.ico)$}) {
-            my $file = $1;
-            last SWITCH if $method ne 'GET';
-            $client->send_file_response("$self->{htmldir}/$file");
-            $status = 200;
             last SWITCH;
         }
 
@@ -185,7 +236,8 @@ sub _handle {
 
     $logger->debug($log_prefix . "response status $status") unless $status == 1;
 
-    if ($status == 200 && $keepalive && --$maxKeepAlive) {
+    # Handle keepalive for success and authentication required status
+    if ((any { $status == $_ } (200, 204, 401)) && $keepalive && --$maxKeepAlive) {
         # Looking for another request
         $request = $client->get_request();
         $self->_handle($client, $request, $clientIp, $maxKeepAlive) if $request;
@@ -206,7 +258,7 @@ sub _handle_plugins {
 
     my $path = $request->uri()->path();
     my $method = $request->method();
-    my $keepalive = $request->header('connection') =~ /keep-alive/i;
+    my $keepalive = ($request->header('connection') // '') =~ /keep-alive/i;
     $logger->debug($log_prefix . "$method request $path from client $clientIp via plugin");
     my $status = 400;
     my $match  = 0;
@@ -216,6 +268,12 @@ sub _handle_plugins {
         if ($plugin->urlMatch($path)) {
             $match = 1;
             last unless ($plugin->supported_method($method));
+            # Only support trusted client if required
+            if ($plugin->forbid_not_trusted() && !$self->_isTrusted($clientIp)) {
+                $status = 403;
+                $client->send_error(403);
+                last;
+            }
             $status = $plugin->handle($client, $request, $clientIp);
             $self->{_timer_event} = time+10
                 if ($self->{_timer_event} > time+10);
@@ -232,7 +290,8 @@ sub _handle_plugins {
     # Don't log status if we forked
     $logger->debug($log_prefix . "response status $status") unless $status == 1;
 
-    if ($status == 200 && $keepalive && --$maxKeepAlive) {
+    # Handle keepalive for success and authentication required status
+    if ((any { $status == $_ } (200, 401)) && $keepalive && --$maxKeepAlive) {
         # Looking for another request
         $request = $client->get_request();
         $self->_handle_plugins($client, $request, $clientIp, $plugins, $maxKeepAlive) if $request;
@@ -265,25 +324,34 @@ sub _handle_root {
         return 500;
     }
 
+    my $trust = $self->_isTrusted($clientIp);
     my @server_targets =
-        map { { name => $_->getUrl(), date => $_->getFormatedNextRunDate() } }
+        map { { id => $_->id(), target => $trust ? $_->getUrl() : '', date => $_->getFormatedNextRunDate() } }
         grep { $_->isType('server') }
         $self->{agent}->getTargets();
 
     my @local_targets =
-        map { { name => $_->getPath(), date => $_->getFormatedNextRunDate() } }
+        map { { id => $_->id(), target => $trust ? $_->getFullPath() : '', date => $_->getFormatedNextRunDate() } }
         grep { $_->isType('local') }
         $self->{agent}->getTargets();
 
-    my @httpd_plugins = map { @{$_->{plugins}} } values(%{$self->{listeners}});
-    push @httpd_plugins, @{$self->{_plugins}};
-    my @listening_plugins =
-        map { { port => $_->config('port') || $self->{port}, name => $_->name() } }
-            grep { ! $_->disabled() }
-                @httpd_plugins;
+    my @listening_plugins = ();
+    my %plugins_url = ();
+    if ($trust) {
+        my @httpd_plugins = map { @{$_->{plugins}} } values(%{$self->{listeners}});
+        push @httpd_plugins, @{$self->{_plugins}};
+        @listening_plugins = map { { port => $_->config('port') || $self->{port}, name => $_->name() } }
+            grep { ! $_->disabled() } @httpd_plugins;
+
+        foreach my $plugin (@httpd_plugins) {
+            my $url = $plugin->url($request)
+                or next;
+            $plugins_url{$plugin->name()} = $url;
+        }
+    }
 
     my @sessions = ();
-    if ($logger && $logger->debug_level() > 1) {
+    if ($trust && $logger && $logger->debug_level() > 1) {
         GLPI::Agent::Target::Listener->require();
         if ($EVAL_ERROR) {
             $self->{logger}->debug($log_prefix . "Failed to load Listener target module: $EVAL_ERROR");
@@ -301,9 +369,10 @@ sub _handle_root {
 
     my $hash = {
         version        => $GLPI::Agent::Version::VERSION,
-        trust          => $self->_isTrusted($clientIp),
+        trust          => $trust,
         status         => $self->{agent}->getStatus(),
         httpd_plugins  => \@listening_plugins,
+        plugins_url    => \%plugins_url,
         server_targets => \@server_targets,
         local_targets  => \@local_targets,
         sessions       => \@sessions,
@@ -372,7 +441,9 @@ sub _handle_now {
     my $logger = $self->{logger};
 
     my ($code, $message) = qw( 200 OK );
-    my $trace;
+    my ($trace, $content);
+
+    my $headers = HTTP::Headers->new();
 
     my @targets;
     foreach my $target ($self->{agent}->getTargets()) {
@@ -388,41 +459,86 @@ sub _handle_now {
     push @targets, $self->{agent}->getTargets()
         if !@targets && $self->_isTrusted($clientIp);
 
-    if (@targets) {
-        my $query = uri_unescape($request->uri()->query());
-        if ($query) {
-            my %event = map { /^([^=]+)=(.*)$/ } grep { /[^=]=/ } split('&', $query);
-            foreach my $target (@targets) {
-                if (my $event = $target->addEvent(\%event)) {
-                    $logger->debug($log_prefix."$event->{name} triggering event on ".$target->id());
-                } else {
-                    $logger->debug($log_prefix."unsupported target event: $query");
+    # Support CORS OPTIONS requests
+    if ($request->method eq 'OPTIONS') {
+        my $acrm = $request->header('Access-Control-Request-Method');
+        if (!@targets || !$acrm || $acrm ne "GET") {
+            $code = 403;
+            $message = "Access denied";
+            $trace   = @targets ? "invalid OPTIONS request (unsupported method)" : "invalid request (untrusted address)";
+        } else {
+            # OPTIONS requests are handled with an empty content
+            $code = 204;
+            $trace = "cors OPTIONS request";
+            # Answer CORS request with Access-Control-Request-Method header
+            $headers->header('Access-Control-Request-Method' => 'GET');
+        }
+
+    } else {
+        $headers->header('Content-Type' => 'text/html');
+
+        if (@targets) {
+            my $query = uri_unescape($request->uri()->query());
+            if ($query) {
+                my %event = map { /^([^=]+)=(.*)$/ } grep { /[^=]=/ } split('&', $query);
+                foreach my $target (@targets) {
+                    my $id = $target->id;
+                    my $event = GLPI::Agent::Event->new(%event);
+                    next if $event->target && $event->target ne $target->id;
+                    # Only support partial event requests via /now
+                    if ($event->name && $event->partial && $target->addEvent($event)) {
+                        $logger->debug($log_prefix.$event->name." triggering event on $id");
+                    } else {
+                        $logger->debug($log_prefix."unsupported event for $id target: ".($event->name ? $event->dump_as_string() : substr($query, 0, 255)));
+                    }
                 }
+            } else {
+                map { $_->setNextRunDateFromNow() } @targets;
+                $trace = "rescheduling next contact for all targets right now";
             }
         } else {
-            map { $_->setNextRunDateFromNow() } @targets;
-            $trace = "rescheduling next contact for all targets right now";
+            $code    = 403;
+            $message = "Access denied";
+            $trace   = "invalid request (untrusted address)";
         }
-    } else {
-        $code    = 403;
-        $message = "Access denied";
-        $trace   = "invalid request (untrusted address)";
+
+        my $template = Text::Template->new(
+            TYPE => 'FILE', SOURCE => "$self->{htmldir}/now.tpl"
+        );
+
+        my $hash = {
+            message => $message
+        };
+
+        $content = $template->fill_in(HASH => $hash);
     }
 
-    my $template = Text::Template->new(
-        TYPE => 'FILE', SOURCE => "$self->{htmldir}/now.tpl"
-    );
+    if ($code != 403) {
+        my $origin = $request->header("Origin") || "";
+        # Check to add Access-Control-Allow-Origin if Origin matches a target
+        if ($origin) {
+            my $this = URI->new($origin);
+            foreach my $target (@targets) {
+                my $url = $target->getUrl();
+                if ($url->authority eq $this->authority) {
+                    # Answer CORS request with required headers
+                    $headers->header('Access-Control-Allow-Origin'   => $origin);
+                    $headers->header('Access-Control-Allow-Headers'  => '*')
+                        if $request->header('Access-Control-Request-Headers');
+                    last;
+                }
+            }
+            # Verify we set allowed origin or deny answer
+            unless ($headers->header('Access-Control-Allow-Origin')) {
+                $code    = 403;
+                $message = "Access denied";
+                $trace   = "invalid request (not allowed origin)";
+                undef $content;
+            }
+        }
+    }
 
-    my $hash = {
-        message => $message
-    };
-
-    my $response = HTTP::Response->new(
-        $code,
-        'OK',
-        HTTP::Headers->new('Content-Type' => 'text/html'),
-        $template->fill_in(HASH => $hash)
-    );
+    my $response = HTTP::Response->new($code, $message." ($trace)", $headers, $content);
 
     $client->send_response($response);
     $logger->debug($log_prefix . $trace) if $trace;
@@ -445,6 +561,9 @@ sub _handle_status {
 
 sub _isTrusted {
     my ($self, $address) = @_;
+
+    # Reset trusted on expiration
+    $self->_handleTrustedAddressesCache();
 
     foreach my $trusted_addresses (values %{$self->{trust}}) {
         return 1
@@ -629,8 +748,8 @@ sub needToRestart {
     );
 
     # Be sure to reset computed trusted addresses
-    delete $self->{trust};
-    $self->setTrustedAddresses(%params);
+    delete $self->{trusted_cache_trust};
+    $self->_handleTrustedAddressesCache($params{trust});
 
     return 0;
 }

@@ -9,7 +9,7 @@ description: |
   configuration before expecting an inventory can be submitted to your
   GLPI server. The following command should be used for that purpose:
   
-  sudo snap set glpi-agent server=http://your-glpi-server/front/inventory.php
+  sudo snap set glpi-agent server=http://your-glpi-server/
 icon: share/html/logo.png
 license: GPL-2.0
 issues: https://github.com/glpi-project/glpi-agent/issues
@@ -76,9 +76,9 @@ apps:
 parts:
   perl:
     plugin: make
-    source: https://www.cpan.org/src/5.0/perl-5.34.0.tar.gz
-    # checksum from https://www.cpan.org/src/5.0/perl-5.34.0.tar.gz.sha256.txt
-    source-checksum: sha256/551efc818b968b05216024fb0b727ef2ad4c100f8cb6b43fab615fa78ae5be9a
+    source: https://www.cpan.org/src/5.0/perl-5.36.0.tar.gz
+    # checksum from https://www.cpan.org/src/5.0/perl-5.36.0.tar.gz.sha256.txt
+    source-checksum: sha256/e26085af8ac396f62add8a533c3a0ea8c8497d836f0689347ac5abd7b7a4e00a
     override-build: |
       rm -f config.sh Policy.sh
       unset ARCHOPT
@@ -110,9 +110,9 @@ parts:
       Time::HiRes HTTP::Daemon Proc::Daemon Parallel::ForkManager
       Compress::Zlib Archive::Extract File::Copy::Recursive File::Which
       Crypt::DES Crypt::Rijndael Digest::HMAC Digest::SHA1
-      Net::IP Net::Ping Net::SNMP Net::NBName Net::CUPS
-      Thread::Queue Parse::EDID JSON JSON::PP
-      Text::Template XML::TreePP XML::XPath Memoize
+      Net::IP Net::Ping Net::SNMP Net::NBName Net::CUPS Net::SSH2
+      Thread::Queue Parse::EDID Cpanel::JSON::XS
+      Text::Template XML::LibXML Memoize
       YAML::Tiny Data::UUID Digest::SHA
       #Net::PCAP Net::Write::Layer2
       MODULES
@@ -122,17 +122,18 @@ parts:
      - libcups2-dev
      - libcupsfilters-dev
      - libcupsimage2-dev
-     - libexpat1-dev
+     - libxml2-dev
+     - libssh2-1-dev
     stage-packages:
      - libcupsimage2
      - libcupsfilters1
      - libcups2
      - libssl1.1
-     - libexpat1
+     - libxml2
      - libavahi-client3
      - libavahi-common3
+     - libssh2-1
     stage:
-      - lib
       - usr/lib
       - usr/share/glpi-agent/bin/perl
       - usr/share/glpi-agent/lib

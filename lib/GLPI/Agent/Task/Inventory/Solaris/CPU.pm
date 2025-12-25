@@ -72,9 +72,10 @@ sub _getCPUs {
         my $speed = $physical_cpus[0]->{speed} || $virtual_cpus[0]->{speed};
         my $type  = $physical_cpus[0]->{type}  || $virtual_cpus[0]->{type};
         my $manufacturer =
-            $type =~ /SPARC/ ? 'SPARC' :
-            $type =~ /Xeon/  ? 'Intel' :
-                               undef   ;
+            $type =~ /SPARC/      ? 'SPARC' :
+            $type =~ /Xeon|Intel/ ? 'Intel' :
+            $type =~ /AMD/        ? 'AMD'   :
+                                    undef   ;
         my $cpus  = scalar @physical_cpus;
 
         my ($cores, $threads) =
@@ -108,6 +109,12 @@ sub _getCPUs {
             $cores = (scalar @virtual_cpus) / $threads / $cpus;
         }
 
+        # Type may contain core number information
+        if ($type =~ /^(.*) (\d+)-Core/) {
+            $type = $1;
+            $cores = int($2);
+        }
+
         for my $i (1 .. $cpus) {
             push @cpus,
                 {
@@ -129,20 +136,18 @@ sub _getVirtualCPUs {
         @_
     );
 
-    my $handle = getFileHandle(%params);
-    return unless $handle;
+    my @lines = getAllLines(%params)
+        or return;
 
     my @cpus;
-    while (my $line = <$handle>) {
+    foreach my $line (@lines) {
         if ($line =~ /The (\S+) processor operates at (\d+) MHz/) {
             push @cpus, {
                 type  => $1,
                 speed => $2,
             };
-            next;
         }
     }
-    close $handle;
 
     return @cpus;
 }
@@ -153,11 +158,12 @@ sub _getPhysicalCPUs {
         @_
     );
 
-    my $handle = getFileHandle(%params);
-    return unless $handle;
+    my @lines = getAllLines(%params)
+        or return;
 
     my @cpus;
-    while (my $line = <$handle>) {
+    foreach my $line (@lines) {
+        $line = getSanitizedString($line);
 
         if ($line =~ /^The physical processor has (\d+) virtual/) {
             push @cpus, {
@@ -192,8 +198,12 @@ sub _getPhysicalCPUs {
             my $cpu = $cpus[-1];
             $cpu->{type} = "Xeon $1";
         }
+
+        if ($line =~ /(\S.+) Processor/) {
+            my $cpu = $cpus[-1];
+            $cpu->{type} = $1;
+        }
     }
-    close $handle;
 
     return @cpus;
 }

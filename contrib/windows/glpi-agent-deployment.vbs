@@ -52,8 +52,8 @@
 '
 
 Option Explicit
-Dim Repair, Verbose
-Dim Setup, SetupArchitecture, SetupLocation, SetupNightlyLocation, SetupOptions, SetupVersion
+Dim Reconfigure, Repair, Verbose
+Dim Setup, SetupArchitecture, SetupLocation, SetupNightlyLocation, SetupOptions, SetupVersion, RunUninstallFusionInventoryAgent, UninstallOcsAgent
 
 '
 '
@@ -64,12 +64,12 @@ Dim Setup, SetupArchitecture, SetupLocation, SetupNightlyLocation, SetupOptions,
 ' SetupVersion
 '    Setup version with the pattern <major>.<minor>.<release>[-<package>]
 '
-SetupVersion = "1.0"
+SetupVersion = "1.7.3"
 
 ' When using a nightly built version, uncomment the following SetupVersion definition line
 ' replacing gitABCDEFGH with the most recent git revision found on the nightly builds site
 ' In that case, SetupNightlyLocation will be selected as location in place of SetupLocation
-'SetupVersion = "1.0-gitABCDEFGH"
+'SetupVersion = "1.8-gitABCDEFGH"
 
 ' SetupLocation
 '    Depending on your needs or your environment, you can use either a HTTP or
@@ -109,12 +109,18 @@ SetupArchitecture = "Auto"
 '    You should use simple quotes (') to set between quotation marks those values
 '    that require it; double quotes (") doesn't work with UNCs.
 '
-SetupOptions = "/quiet RUNNOW=1 SERVER='http://glpi.yourcompany.com/front/inventory.php'"
+SetupOptions = "/quiet RUNNOW=1 SERVER='http://glpi.yourcompany.com/'"
+'SetupOptions = "/quiet RUNNOW=1 SERVER='http://glpi.yourcompany.com/plugins/fusioninventory'"
 
 ' Setup
 '    The installer file name. You should not have to modify this variable ever.
 '
 Setup = "GLPI-Agent-" & SetupVersion & "-" & SetupArchitecture & ".msi"
+
+' Reconfigure
+'    Just reconfigure the current installation if installed agent has the same version
+'
+Reconfigure = "Yes"
 
 ' Repair
 '    Repair the installation when Setup is still installed.
@@ -128,11 +134,122 @@ Repair = "No"
 '
 Verbose = "No"
 
+' RunUninstallFusionInventoryAgent
+'    Set to "Yes" to first uninstall FusionInventory Agent
+'    Also and unless SERVER or LOCAL are defined in SetupOptions, this script
+'    will try to get them from FusionInventory-Agent configuration found in registry
+'
+RunUninstallFusionInventoryAgent = "No"
+
+' UninstallOcsAgent
+'    Enable or disable the uninstallation of OCS Agent
+'
+UninstallOcsAgent = "No"
+
 '
 '
 ' DO NOT EDIT BELOW
 '
 '
+
+Function removeOCSAgents()
+   On error resume next
+
+   Dim Uninstall
+   ' Uninstall agent ocs if is installed
+   ' Verification on OS 32 Bits
+   On error resume next
+   Uninstall = WshShell.RegRead("HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\OCS Inventory Agent\UninstallString")
+   If err.number = 0 then
+      WshShell.Run "CMD.EXE /C net stop ""OCS INVENTORY SERVICE""",0,True
+      WshShell.Run "CMD.EXE /C """ & Uninstall & """ /S /NOSPLASH",0,True
+      WshShell.Run "CMD.EXE /C rmdir ""%ProgramFiles%\OCS Inventory Agent"" /S /Q",0,True
+      WshShell.Run "CMD.EXE /C rmdir ""%SystemDrive%\ocs-ng"" /S /Q",0,True
+      WshShell.Run "CMD.EXE /C sc delete ""OCS INVENTORY""",0,True
+   End If
+
+   ' Verification on OS 64 Bits
+   On error resume next
+   Uninstall = WshShell.RegRead("HKEY_LOCAL_MACHINE\SOFTWARE\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall\OCS Inventory Agent\UninstallString")
+   If err.number = 0 then
+      WshShell.Run "CMD.EXE /C net stop ""OCS INVENTORY SERVICE""",0,True
+      WshShell.Run "CMD.EXE /C """ & Uninstall & """ /S /NOSPLASH",0,True
+      WshShell.Run "CMD.EXE /C rmdir ""%ProgramFiles(x86)%\OCS Inventory Agent"" /S /Q",0,True
+      WshShell.Run "CMD.EXE /C rmdir ""%SystemDrive%\ocs-ng"" /S /Q",0,True
+      WshShell.Run "CMD.EXE /C sc delete ""OCS INVENTORY""",0,True
+   End If
+
+   ' Verification Agent V2 on 32Bit
+   On error resume next
+   Uninstall = WshShell.RegRead("HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\OCS Inventory NG Agent\UninstallString")
+   If err.number = 0 then
+      WshShell.Run "CMD.EXE /C net stop ""OCS INVENTORY SERVICE""",0,True
+      WshShell.Run "CMD.EXE /C taskkill /F /IM ocssystray.exe",0,True
+      WshShell.Run "CMD.EXE /C """ & Uninstall & """ /S /NOSPLASH",0,True
+      WshShell.Run "CMD.EXE /C rmdir ""%ProgramFiles%\OCS Inventory Agent"" /S /Q",0,True
+      WshShell.Run "CMD.EXE /C rmdir ""%SystemDrive%\ocs-ng"" /S /Q",0,True
+      WshShell.Run "CMD.EXE /C sc delete ""OCS INVENTORY""",0,True
+   End If
+
+   ' Verification Agent V2 on 64Bit
+   On error resume next
+   Uninstall = WshShell.RegRead("HKLM\SOFTWARE\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall\OCS Inventory NG Agent\UninstallString")
+   If err.number = 0 then
+      WshShell.Run "CMD.EXE /C net stop ""OCS INVENTORY SERVICE""",0,True
+      WshShell.Run "CMD.EXE /C taskkill /F /IM ocssystray.exe",0,True
+      WshShell.Run "CMD.EXE /C """ & Uninstall & """ /S /NOSPLASH",0,True
+      WshShell.Run "CMD.EXE /C rmdir ""%ProgramFiles%\OCS Inventory Agent"" /S /Q",0,True
+      WshShell.Run "CMD.EXE /C rmdir ""%SystemDrive%\ocs-ng"" /S /Q",0,True
+      WshShell.Run "CMD.EXE /C sc delete ""OCS INVENTORY""",0,True
+   End If
+End Function
+
+Function hasOption(opt)
+   Dim regEx
+   Set regEx = New RegExp
+   regEx.Global = true
+   regEx.IgnoreCase = False
+   regEx.Pattern = "\b" & opt & "=.+\b"
+   hasOption = regEx.Test(SetupOptions)
+End Function
+
+Function uninstallFusionInventoryAgent()
+   Dim Uninstall, getValue
+
+   ' Try to get SERVER and LOCAL from FIA configuration in registry if needed
+   If not hasOption("SERVER") then
+      On error resume next
+      getValue = WshShell.RegRead("HKEY_LOCAL_MACHINE\SOFTWARE\FusionInventory-Agent\server")
+      If err.number = 0 And getValue <> "" then
+         SetupOptions = SetupOptions & " SERVER='" & getValue & "'"
+      End If
+   End If
+   If not hasOption("LOCAL") then
+      On error resume next
+      getValue = WshShell.RegRead("HKEY_LOCAL_MACHINE\SOFTWARE\FusionInventory-Agent\local")
+      If err.number = 0 And getValue <> "" then
+         SetupOptions = SetupOptions & " LOCAL='" & getValue & "'"
+      End If
+   End If
+
+   ' Verify normal case
+   On error resume next
+   Uninstall = WshShell.RegRead("HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\FusionInventory-Agent\UninstallString")
+   If err.number = 0 then
+      WshShell.Run "CMD.EXE /C net stop FusionInventory-Agent",0,True
+      WshShell.Run "CMD.EXE /C """ & Uninstall & """ /S /NOSPLASH",0,True
+      WshShell.Run "CMD.EXE /C rmdir ""%ProgramFiles%\FusionInventory-Agent"" /S /Q",0,True
+   End If
+
+   ' Verify FIA x86 is installed on x64 OS
+   On error resume next
+   Uninstall = WshShell.RegRead("HKEY_LOCAL_MACHINE\SOFTWARE\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall\FusionInventory-Agent\UninstallString")
+   If err.number = 0 then
+      WshShell.Run "CMD.EXE /C net stop FusionInventory-Agent",0,True
+      WshShell.Run "CMD.EXE /C """ & Uninstall & """ /S /NOSPLASH",0,True
+      WshShell.Run "CMD.EXE /C rmdir ""%ProgramFiles(x86)%\FusionInventory-Agent"" /S /Q",0,True
+   End If
+End Function
 
 Function AdvanceTime(nMinutes)
    Dim nMinimalMinutes, dtmTimeFuture
@@ -149,7 +266,7 @@ Function AdvanceTime(nMinutes)
 End Function
 
 Function baseName (strng)
-   Dim regEx, ret
+   Dim regEx
    Set regEx = New RegExp
    regEx.Global = true
    regEx.IgnoreCase = True
@@ -266,6 +383,15 @@ Function IsInstallationNeeded(strSetupVersion, strSetupArchitecture, strSystemAr
    End If
 End Function
 
+Function IsSelectedReconfigure()
+   If LCase(Reconfigure) <> "no" Then
+      ShowMessage("Installation reconfigure: " & SetupVersion)
+      IsSelectedReconfigure = True
+   Else
+      IsSelectedReconfigure = False
+   End If
+End Function
+
 Function IsSelectedRepair()
    If LCase(Repair) <> "no" Then
       ShowMessage("Installation repairing: " & SetupVersion)
@@ -333,6 +459,63 @@ Function ShowMessage(strMessage)
    End If
 End Function
 
+Function MsiServerAvailable()
+   Dim loopCount, objWMIService, oMsiServer, oServicePath, errExecMethod
+   MsiServerAvailable = false
+   Const maxLoops = 120
+   loopCount = 0
+   'Wait maximum 2 minutes to get MsiServer service available
+   Set objWMIService = GetObject("winmgmts:\\.\root\CIMV2")
+   Do While loopCount < maxLoops
+      If loopCount > 0 Then
+         WScript.Sleep 1000
+      End If
+      Set oMsiServer = GetObject("winmgmts:Win32_Service='MsiServer'")
+      If oMsiServer.State = "Stopped" Then
+         MsiServerAvailable = true
+         Exit Function
+      End If
+      Set oServicePath = oMsiServer.Path_
+      Set errExecMethod = objWMIService.ExecMethod(oServicePath, "StopService")
+      'StopService method should fail with ReturnValue set to 5 on MsiServer business
+      If errExecMethod.ReturnValue = 0 Then
+         MsiServerAvailable = true
+         Exit Function
+      End If
+      loopCount = loopCount + 1
+   Loop
+End Function
+
+Function MsiExec(strOptions)
+   Dim loopCount
+   Const maxLoops = 3
+   loopCount = 0
+   Do While loopCount < maxLoops
+      If loopCount > 0 Then
+         ShowMessage("Next attempt in 30 seconds...")
+         WScript.Sleep 30000
+      End If
+      If MsiServerAvailable() Then
+         ShowMessage("Running: MsiExec.exe " & strOptions)
+         MsiExec = WshShell.Run("MsiExec.exe " & strOptions, 0, True)
+         ' Error 1618 occurs on MsiServer business, we should only retry on that error
+         If MsiExec <> 1618 Then
+            Exit Do
+         End If
+      Else
+         MsiExec = 1618
+      End If
+      loopCount = loopCount + 1
+   Loop
+   If MsiExec = 0 Then
+      ShowMessage("Deployment done!")
+   ElseIf MsiExec = 1618 Then
+      ShowMessage("Deployment failed: MSI Installer is busy!")
+   Else
+      ShowMessage("Deployment failed! (Err=" & MsiExec & ")")
+   End If
+End Function
+
 '
 '
 ' MAIN
@@ -343,6 +526,14 @@ Dim nMinutesToAdvance, strCmd, strSystemArchitecture, strTempDir, WshShell, strI
 Set WshShell = WScript.CreateObject("WScript.shell")
 
 nMinutesToAdvance = 5
+
+If UninstallOcsAgent = "Yes" Then
+   removeOCSAgents()
+End If
+
+If RunUninstallFusionInventoryAgent = "Yes" Then
+    uninstallFusionInventoryAgent()
+End If
 
 ' Get system architecture
 strSystemArchitecture = GetSystemArchitecture()
@@ -393,6 +584,11 @@ If IsInstallationNeeded(SetupVersion, SetupArchitecture, strSystemArchitecture) 
 ElseIf IsSelectedRepair() Then
    strInstallOrRepair = "/fa"
    bInstall = True
+ElseIf IsSelectedReconfigure() Then
+   If not hasOption("REINSTALL") Then
+      SetupOptions = SetupOptions & " REINSTALL=feat_AGENT"
+   End If
+   bInstall = True
 End If
 
 If bInstall Then
@@ -404,18 +600,18 @@ If bInstall Then
       If SaveWebBinary(SetupLocation, Setup) Then
          strCmd = WshShell.ExpandEnvironmentStrings("%ComSpec%")
          strTempDir = WshShell.ExpandEnvironmentStrings("%TEMP%")
-         ShowMessage("Running: MsiExec.exe " & strInstallOrRepair & " """ & strTempDir & "\" & Setup & """ " & SetupOptions)
-         WshShell.Run "MsiExec.exe " & strInstallOrRepair & " """ & strTempDir & "\" & Setup & """ " & SetupOptions, 0, True
+         MsiExec(strInstallOrRepair & " """ & strTempDir & "\" & Setup & """ " & SetupOptions)
          ShowMessage("Scheduling: DEL /Q /F """ & strTempDir & "\" & Setup & """")
          WshShell.Run "AT.EXE " & AdvanceTime(nMinutesToAdvance) & " " & strCmd & " /C ""DEL /Q /F """"" & strTempDir & "\" & Setup & """""", 0, True
-         ShowMessage("Deployment done!")
       Else
          ShowMessage("Error downloading '" & SetupLocation & "\" & Setup & "'!")
       End If
    Else
-      ShowMessage("Running: MsiExec.exe " & strInstallOrRepair & " """ & SetupLocation & "\" & Setup & """ " & SetupOptions)
-      WshShell.Run "MsiExec.exe " & strInstallOrRepair & " """ & SetupLocation & "\" & Setup & """ " & SetupOptions, 0, True
-      ShowMessage("Deployment done!")
+      'Don't include path if empty or set to current folder
+      If SetupLocation <> "" And SetupLocation <> "." Then
+         Setup = SetupLocation & "\" & Setup
+      End If
+      MsiExec(strInstallOrRepair & " """ & Setup & """ " & SetupOptions)
    End If
 Else
    ShowMessage("It isn't needed the installation of '" & Setup & "'.")

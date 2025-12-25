@@ -6,6 +6,7 @@ use warnings;
 use base "GLPI::Agent::Config";
 
 use Cwd qw(abs_path);
+use URI;
 
 use GLPI::Agent::Tools;
 
@@ -68,6 +69,10 @@ sub init {
             $self->debug($self->{name}." Server plugin configuration missing: $config");
         }
     }
+
+    # Handle forbid_not_trusted option
+    my $forbid_not_trusted = $self->config("forbid_not_trusted");
+    $self->{forbid_not_trusted} = defined($forbid_not_trusted) && $forbid_not_trusted !~ /^0|no$/i ? 1 : 0;
 }
 
 # Plugins with greater priority values are used first
@@ -82,6 +87,22 @@ sub name {
 # is to be read while config_file() method returns a config filename
 sub defaults {
     return {};
+}
+
+sub url {
+    my ($self, $request) = @_;
+
+    my $defaults = $self->defaults();
+    return unless $defaults->{url_path};
+
+    my ($scheme) = ref($request->uri()) =~ /^URI::(.+)$/;
+    return unless $scheme && $scheme =~ /^http/;
+
+    my ($path) = $self->config('url_path') // $defaults->{url_path};
+    my $uri = URI->new($scheme.'://'.$request->header('host').$path);
+    $uri->port($self->port()) if $self->port();
+
+    return $uri->canonical();
 }
 
 sub supported_method {
@@ -108,9 +129,9 @@ sub disabled {
 }
 
 sub disable {
-    my ($self) = @_;
+    my ($self, $reason) = @_;
     $self->{disabled} = 1;
-    $self->info("plugin disabled");
+    $self->info($reason // "plugin disabled");
 }
 
 sub log_prefix {
@@ -146,6 +167,12 @@ sub config {
     $self->{$name} = $value if (defined($value));
     return $self->{$name};
 }
+
+# Don't trust client by default
+sub forbid_not_trusted {
+    my ($self) = @_;
+    return $self->{forbid_not_trusted};
+};
 
 sub config_file {}
 

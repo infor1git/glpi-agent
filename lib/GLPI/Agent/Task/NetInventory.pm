@@ -2,21 +2,23 @@ package GLPI::Agent::Task::NetInventory;
 
 use strict;
 use warnings;
-use threads;
+
 use parent 'GLPI::Agent::Task';
 
-use Encode qw(encode);
 use English qw(-no_match_vars);
 use Time::HiRes qw(usleep);
-use Thread::Queue v2.01;
 use UNIVERSAL::require;
+use Parallel::ForkManager;
+use File::Path qw(mkpath);
 
-use GLPI::Agent::XML::Query;
 use GLPI::Agent::Version;
 use GLPI::Agent::Tools;
 use GLPI::Agent::Tools::Hardware;
 use GLPI::Agent::Tools::Network;
 use GLPI::Agent::Tools::Expiration;
+use GLPI::Agent::HTTP::Client::OCS;
+# We need to preload MibSupport configuration before running threads
+use GLPI::Agent::SNMP::MibSupport;
 
 use GLPI::Agent::Task::NetInventory::Version;
 use GLPI::Agent::Task::NetInventory::Job;
@@ -26,12 +28,14 @@ our $VERSION = GLPI::Agent::Task::NetInventory::Version::VERSION;
 sub isEnabled {
     my ($self, $contact) = @_;
 
-    if ($self->{target}->isGlpiServer()) {
-        # TODO Support NetInventory task via GLPI Agent Protocol
-        $self->{logger}->debug("NetInventory task not supported by GLPI server");
-        return;
-    } elsif (!$self->{target}->isType('server')) {
+    if (!$self->{target}->isType('server')) {
         $self->{logger}->debug("NetInventory task not compatible with local target");
+        return;
+    }
+
+    if (ref($contact) ne 'GLPI::Agent::XML::Response') {
+        # TODO Support NetInventory task via GLPI Agent Protocol
+        $self->{logger}->debug("NetInventory task not supported by server");
         return;
     }
 
@@ -42,14 +46,22 @@ sub isEnabled {
     }
 
     my @jobs;
+    # Parse and validate options
     foreach my $option (@options) {
-        if (!$option->{DEVICE}) {
+
+        next unless ref($option) eq 'HASH';
+
+        unless (ref($option->{DEVICE}) eq 'ARRAY') {
             $self->{logger}->error("invalid job: no device defined");
             next;
         }
 
         my @devices;
         foreach my $device (@{$option->{DEVICE}}) {
+            unless (ref($device) eq 'HASH') {
+                $self->{logger}->error("invalid device found");
+                next;
+            }
             if (!$device->{IP}) {
                 $self->{logger}->error("invalid device: no address defined");
                 next;
@@ -62,7 +74,17 @@ sub isEnabled {
             next;
         }
 
+        unless (ref($option->{PARAM}) eq 'ARRAY') {
+            $self->{logger}->error("invalid job: no valid param defined");
+            next;
+        }
+
         my $params = $option->{PARAM}->[0];
+
+        unless (ref($params) eq 'HASH') {
+            $self->{logger}->error("invalid job: invalid param defined");
+            next;
+        }
 
         push @jobs, GLPI::Agent::Task::NetInventory::Job->new(
             logger      => $self->{logger},
@@ -82,81 +104,21 @@ sub isEnabled {
     return 1;
 }
 
-sub _inventory_thread {
-    my ($self, $jobs, $done) = @_;
-
-    my $id = threads->tid();
-    $self->{logger}->debug("[thread $id] creation");
-
-    # run as long as they are a job to process
-    while (my $job = $jobs->dequeue()) {
-
-        last unless ref($job) eq 'HASH';
-        last if $job->{leave};
-
-        my $device = $job->{device};
-
-        my $result;
-        eval {
-            $result = $self->_queryDevice($job);
-        };
-        if ($EVAL_ERROR) {
-            chomp $EVAL_ERROR;
-            $result = {
-                ERROR => {
-                    ID      => $device->{ID},
-                    MESSAGE => $EVAL_ERROR
-                }
-            };
-
-            $result->{ERROR}->{TYPE} = $device->{TYPE} if $device->{TYPE};
-
-            # Inserted back device PID in result if set by server
-            $result->{PID} = $device->{PID} if defined($device->{PID});
-
-            $self->{logger}->error("[thread $id] $EVAL_ERROR");
-        }
-
-        # Get result PID from result
-        my $pid = delete $result->{PID};
-
-        # Directly send the result message from the thread, but use job pid if
-        # it was not set in result
-        $self->_sendResultMessage($result, $pid || $job->{pid});
-
-        $done->enqueue($job);
-    }
-
-    delete $self->{logger}->{prefix};
-
-    $self->{logger}->debug("[thread $id] termination");
-}
-
 sub run {
     my ($self, %params) = @_;
 
-    # Prepare client configuration in needed to send message to server
-    $self->{_client_params} = {
-        logger       => $self->{logger},
-        user         => $params{user},
-        password     => $params{password},
-        proxy        => $params{proxy},
-        ca_cert_file => $params{ca_cert_file},
-        ca_cert_dir  => $params{ca_cert_dir},
-        no_ssl_check => $params{no_ssl_check},
-        no_compress  => $params{no_compress},
-        ssl_cert_file => $params{ssl_cert_file},
-    } if !$self->{client};
+    my $abort = 0;
+    $SIG{TERM} = sub { $abort = 1; };
+
+    # Preload MibSupport
+    GLPI::Agent::SNMP::MibSupport::preload(
+        config  => $self->{config},
+        logger  => $self->{logger}
+    );
 
     # Extract greatest max_threads from jobs
     my ($max_threads) = sort { $b <=> $a } map { int($_->max_threads()) }
         @{$self->{jobs}};
-
-    my %running_threads = ();
-
-    # initialize FIFOs
-    my $jobs = Thread::Queue->new();
-    my $done = Thread::Queue->new();
 
     # count devices and check skip_start_stop
     my $devices_count   = 0;
@@ -164,173 +126,177 @@ sub run {
     foreach my $job (@{$self->{jobs}}) {
         $devices_count += $job->count();
         # newer server won't need START message if PID is provided on <DEVICE/>
-        $skip_start_stop = any { defined($_->{PID}) } $job->devices()
-            unless $skip_start_stop;
+        next if $skip_start_stop;
+        $skip_start_stop = $job->skip_start_stop || any { defined($_->{PID}) } $job->devices();
     }
 
-    # Define a job expiration: 15 minutes by device to scan should be enough, but not less than an hour
-    my $target_expiration = 900;
+    # Define a job expiration based on backend-collect-timeout: by default 15 minutes
+    # by device to scan should be enough, keeping a large minimal global task expiration of one hour
+    my $target_expiration = 5*$self->{config}->{'backend-collect-timeout'};
     my $global_timeout = $devices_count * $target_expiration;
     $global_timeout = 3600 if $global_timeout < 3600;
     setExpirationTime( timeout => $global_timeout );
     my $expiration = getExpirationTime();
     $self->_logExpirationHours($expiration);
 
-    # no need more threads than devices to scan
-    my $threads_count = $max_threads > $devices_count ? $devices_count : $max_threads;
+    # no need more workers than devices to scan
+    my $worker_count = $max_threads > $devices_count ? $devices_count : $max_threads;
 
-    $self->{logger}->debug("creating $threads_count worker threads");
-    for (my $i = 0; $i < $threads_count; $i++) {
-        my $newthread = threads->create(sub { $self->_inventory_thread($jobs, $done); });
-        # Keep known created threads in a hash
-        $running_threads{$newthread->tid()} = $newthread ;
-        usleep(50000) until ($newthread->is_running() || $newthread->is_joinable());
-    }
+    # Prepare fork manager
+    $self->{logger}->debug("using $worker_count netinventory worker".($worker_count > 1 ? "s" : ""));
+    my $manager = Parallel::ForkManager->new($worker_count > 1 ? $worker_count : 0);
+    $manager->set_waitpid_blocking_sleep(0);
 
-    # Check really started threads number vs really running ones
-    my @really_running  = map { $_->tid() } threads->list(threads::running);
-    my @started_threads = keys(%running_threads);
-    unless (@really_running == $threads_count && keys(%running_threads) == $threads_count) {
-        $self->{logger}->debug(scalar(@really_running)." really running: [@really_running]");
-        $self->{logger}->debug(scalar(@started_threads)." started: [@started_threads]");
-    }
-
-    my %queues = ();
+    my %jobs = ();
     my $pid_index = 1;
 
     # Start jobs by preparing queues
     foreach my $job (@{$self->{jobs}}) {
 
-        # SNMP credentials
-        my $credentials = $job->credentials();
-
         # set pid
         my $pid = $job->pid() || $pid_index++;
 
-        # send initial message to server unless it supports newer protocol
-        $self->_sendStartMessage($pid) unless $skip_start_stop;
-
-        # prepare queue
-        my $queue = $queues{$pid} || {
-            max_in_queue    => $job->max_threads(),
-            in_queue        => 0,
-            todo            => []
-        };
-        foreach my $device ($job->devices()) {
-            push @{$queue->{todo}}, {
-                pid         => $pid,
-                device      => $device,
-                timeout     => $job->timeout(),
-                credentials => $credentials->{$device->{AUTHSNMP_ID}}
-            };
+        # send initial message to server in a worker unless it supports newer protocol
+        unless ($skip_start_stop || $manager->start(0)) {
+            $self->_sendStartMessage($pid);
+            $manager->finish();
         }
 
-        # Only keep queue if we have a device to scan
-        $queues{$pid} = $queue
-            if @{$queue->{todo}};
+        # Only keep job if it has devices to scan
+        my @devices = $job->devices()
+            or next;
+
+        # prepare job
+        $jobs{$pid} = $job unless $jobs{$pid};
+        $jobs{$pid}->updateQueue(\@devices);
     }
+    $manager->wait_all_children();
 
     my $queued_count = 0;
+
+    # Callback for processed device
+    $manager->run_on_finish(
+        sub {
+            my ($pid, $ret, $jobid) = @_;
+            return unless $jobid;
+            my $job = $jobs{$jobid};
+            $queued_count--;
+            if ($job->done) {
+                # send final message to the server before cleaning jobs
+                $self->_sendStopMessage($jobid) unless $skip_start_stop;
+
+                delete $jobs{$jobid};
+
+                # send final message to the server
+                $self->_sendStopMessage($jobid) unless $skip_start_stop;
+            }
+            $devices_count--;
+            # Only reduce expiration when few devices are still to be scanned
+            if ($devices_count > 4 && $expiration > time + $devices_count*$target_expiration) {
+                $expiration -= $target_expiration;
+                setExpirationTime( expiration => $expiration );
+                $self->_logExpirationHours($expiration);
+            }
+        }
+    );
+
     my $job_count = 0;
     my $jid_len = length(sprintf("%i",$devices_count));
-    my $jid_pattern = "#%0".$jid_len."i";
+    my $jid_pattern = "#%0".$jid_len."i, ";
 
-    # We need to guaranty we don't have more than max_in_queue device in shared
-    # queue for each job
-    while (my @pids = sort { $a <=> $b } keys(%queues)) {
+    # We need to guaranty we don't have more than max_in_queue request in queue for each job
+    while (my @pids = sort { $a <=> $b } keys(%jobs)) {
 
-        # Enqueue as device as possible
+        # Enqueue as device as possible for each job
         foreach my $pid (@pids) {
-            my $queue = $queues{$pid};
-            next unless @{$queue->{todo}};
-            next if $queue->{in_queue} >= $queue->{max_in_queue};
-            my $device = shift @{$queue->{todo}};
-            $queue->{in_queue} ++;
-            $device->{jid} = sprintf($jid_pattern, ++$job_count);
-            $jobs->enqueue($device);
+            # job may has just been done & deleted in run_on_finish() manager callback
+            my $job = $jobs{$pid}
+                or next;
+            next if $job->no_more || $job->max_in_queue;
+            my $device = $job->nextdevice
+                or next;
+
             $queued_count++;
-        }
-
-        # as long as some of our threads are still running...
-        if (keys(%running_threads)) {
-
-            # send available results on the fly
-            while (my $device = $done->dequeue_nb()) {
-                my $pid = $device->{pid};
-                my $queue = $queues{$pid};
-                $queue->{in_queue} --;
-                $queued_count--;
-                unless ($queue->{in_queue} || @{$queue->{todo}}) {
-                    # send final message to the server before cleaning threads unless it supports newer protocol
-                    $self->_sendStopMessage($pid) unless $skip_start_stop;
-
-                    delete $queues{$pid};
-
-                    # send final message to the server unless it supports newer protocol
-                    $self->_sendStopMessage($pid) unless $skip_start_stop;
-                }
-                # Check if it's time to abort a thread
-                $devices_count--;
-                if ($devices_count < $threads_count) {
-                    $jobs->enqueue({ leave => 1 });
-                    $threads_count--;
-                } elsif ($devices_count>3600/$target_expiration) {
-                    # Only reduce expiration when still using all threads or and few devices are still to be scanned
-                    $expiration -= $target_expiration;
-                    $self->_logExpirationHours($expiration);
-                }
-            }
-
-            # wait for a little
-            usleep(50000);
 
             if ($expiration && time > $expiration) {
                 $self->{logger}->warning("Aborting netinventory job as it reached expiration time");
-                # detach all our running worker
-                foreach my $tid (keys(%running_threads)) {
-                    $running_threads{$tid}->detach()
-                        if $running_threads{$tid}->is_running();
-                    delete $running_threads{$tid};
-                }
+                $self->{logger}->info("You can set backend-collect-timout higher than the default to use a longer expiration timeout");
+                $abort ++;
                 last;
             }
 
-            # List our created and possibly running threads in a list to check
-            my %running_threads_checklist = map { $_ => 0 }
-                keys(%running_threads);
-
-            foreach my $running (threads->list(threads::running)) {
-                my $tid = $running->tid();
-                # Skip if this running thread tid is not is our started list
-                next unless exists($running_threads{$tid});
-
-                # Check a thread is still running
-                $running_threads_checklist{$tid} = 1 ;
+            if ($abort) {
+                $self->{logger}->warning("Aborting netinventory task on TERM signal");
+                last;
             }
 
-            # Clean our started list from thread tid that don't run anymore
-            foreach my $tid (keys(%running_threads_checklist)) {
-                delete $running_threads{$tid}
-                    unless $running_threads_checklist{$tid};
+            $job_count++;
+
+            # Start worker and still try to enqueue another device for this job
+            $manager->start($pid) and redo;
+
+            # logprefix can still be set by NetDiscovery task if netscan is enabled
+            $self->{logger}->{prefix} = sprintf($jid_pattern, $job_count)
+                unless $self->{logger}->{prefix};
+
+            my $result;
+            eval {
+                $result = $self->_queryDevice(
+                    pid         => $pid,
+                    timeout     => $job->timeout(),
+                    credential  => $job->credential($device->{AUTHSNMP_ID}),
+                    device      => $device
+                );
+            };
+            if ($EVAL_ERROR) {
+                chomp $EVAL_ERROR;
+                $result = {
+                    ERROR => {
+                        ID      => $device->{ID},
+                        MESSAGE => $EVAL_ERROR
+                    }
+                };
+
+                $result->{ERROR}->{TYPE} = $device->{TYPE} if $device->{TYPE};
+
+                # Inserted back device PID in result if set by server
+                $result->{PID} = $device->{PID} if defined($device->{PID});
+
+                $self->{logger}->error("$EVAL_ERROR");
             }
-            last unless keys(%running_threads);
+
+            # Get result PID from result
+            my $thispid = delete $result->{PID};
+
+            # Directly send the result message from the worker, but use job pid if
+            # it was not set in result
+            $self->_sendResultMessage($result, $thispid || $pid, $device->{IP});
+
+            delete $self->{logger}->{prefix} if $worker_count > 1;
+
+            $manager->finish(0);
         }
+
+        last if $abort;
+
+        # wait a little bit
+        usleep(50000);
+        $manager->reap_finished_children();
     }
+
+    $manager->wait_all_children();
+
+    $self->{logger}->debug($worker_count>1 ? "All netinventory workers terminated" : "Netinventory worker terminated");
 
     if ($queued_count) {
         $self->{logger}->error("$queued_count devices inventory are missing");
     }
 
     # Send exit message if we quit during a job still being run
-    foreach my $pid (sort { $a <=> $b } keys(%queues)) {
-        $self->{logger}->error("job $pid aborted");
+    foreach my $pid (sort { $a <=> $b } keys(%jobs)) {
+        $self->{logger}->warning("job $pid aborted");
         $self->_sendExitMessage($pid);
     }
-
-    # Cleanup joinable threads
-    $_->join() foreach threads->list(threads::joinable);
-    $self->{logger}->debug("All netinventory threads terminated")
-        unless threads->list(threads::running);
 
     # Reset expiration
     setExpirationTime();
@@ -361,11 +327,14 @@ sub _logExpirationHours {
         $remaining = sprintf("%.1f hour", $remaining);
     }
 
-    $self->{logger}->debug("Current run expiration timeout: $remaining");
+    $self->{logger}->debug("Current netinventory run expiration timeout: $remaining");
 }
 
 sub _sendMessage {
-    my ($self, $content) = @_;
+    my ($self, $content, $ip) = @_;
+
+    # Load GLPI::Agent::XML::Query as late as possible
+    return unless GLPI::Agent::XML::Query->require();
 
     my $message = GLPI::Agent::XML::Query->new(
         deviceid => $self->{deviceid} || 'foo',
@@ -373,14 +342,47 @@ sub _sendMessage {
         content  => $content
     );
 
-    # task-specific client, if needed
-    $self->{client} = GLPI::Agent::HTTP::Client::OCS->new(%{$self->{_client_params}})
-        if !$self->{client};
+    if ($self->{target}->isType('local')) {
+        my ($handle, $file);
+        my $device = $content->{DEVICE}
+            or return;
+        my $path = $self->{target}->getPath();
+        if ($path eq '-') {
+            $handle = \*STDOUT;
+        } else {
+            $path = $self->{target}->getFullPath("netinventory");
+            mkpath($path) unless -d $path;
+            $file = $path . "/$ip.xml";
+        }
 
-    $self->{client}->send(
-        url     => $self->{target}->getUrl(),
-        message => $message
-    );
+        if ($file) {
+            if ($OSNAME eq 'MSWin32' && Win32::Unicode::File->require()) {
+                $handle = Win32::Unicode::File->new('w', $file)
+                    or $self->{logger}->error("Can't write to $file: $ERRNO");
+            } else {
+                open($handle, '>', $file)
+                    or $self->{logger}->error("Can't write to $file: $ERRNO");
+            }
+            return unless $handle;
+            $self->{logger}->info("Netinventory result for $ip saved in $file");
+        }
+
+        print $handle $message->getContent();
+        close($handle) if $file;
+
+    } elsif ($self->{target}->isType('server')) {
+        unless ($self->{client}) {
+            $self->{client} = GLPI::Agent::HTTP::Client::OCS->new(
+                logger  => $self->{logger},
+                config  => $self->{config},
+            );
+        }
+
+        $self->{client}->send(
+            url     => $self->{target}->getUrl(),
+            message => $message
+        );
+    }
 }
 
 sub _sendStartMessage {
@@ -421,27 +423,32 @@ sub _sendExitMessage {
 }
 
 sub _sendResultMessage {
-    my ($self, $result, $pid) = @_;
+    my ($self, $result, $pid, $ip) = @_;
 
-    $self->_sendMessage({
+    my $content = {
         DEVICE        => $result,
         MODULEVERSION => $VERSION,
         PROCESSNUMBER => $pid || 0
-    });
+    };
+
+    # Keep STORAGES as CONTENT node like for Computers
+    $content->{STORAGES} = delete $result->{STORAGES}
+        if $result->{STORAGES};
+
+    $self->_sendMessage($content, $ip);
 }
 
 sub _queryDevice {
-    my ($self, $params) = @_;
+    my ($self, %params) = @_;
 
-    my $credentials = $params->{credentials};
-    my $device      = $params->{device};
-    my $logger      = $self->{logger};
-    my $id          = threads->tid();
-    $logger->{prefix} = "[thread $id] $params->{jid}, ";
-    $logger->debug(
-        "scanning $device->{ID}: $device->{IP}" .
+    my $credential  = $params{credential};
+    my $device      = $params{device};
+
+    $self->{logger}->debug(
+        "full snmp scan of $device->{IP}" .
         ( $device->{PORT} ? ' on port ' . $device->{PORT} : '' ) .
-        ( $device->{PROTOCOL} ? ' via ' . $device->{PROTOCOL} : '' )
+        ( $device->{PROTOCOL} ? ' via ' . $device->{PROTOCOL} : '' ) .
+        " with credentials " . $device->{AUTHSNMP_ID}
     );
 
     my $snmp;
@@ -459,29 +466,31 @@ sub _queryDevice {
             GLPI::Agent::SNMP::Live->require();
             # AUTHPASSPHRASE & PRIVPASSPHRASE are deprecated but still used by FusionInventory for GLPI plugin
             $snmp = GLPI::Agent::SNMP::Live->new(
-                version      => $credentials->{VERSION},
+                version      => $credential->{VERSION},
                 hostname     => $device->{IP},
                 port         => $device->{PORT},
                 domain       => $device->{PROTOCOL},
-                timeout      => $params->{timeout} || 15,
-                community    => $credentials->{COMMUNITY},
-                username     => $credentials->{USERNAME},
-                authpassword => $credentials->{AUTHPASSPHRASE} // $credentials->{AUTHPASSWORD},
-                authprotocol => $credentials->{AUTHPROTOCOL},
-                privpassword => $credentials->{PRIVPASSPHRASE} // $credentials->{PRIVPASSWORD},
-                privprotocol => $credentials->{PRIVPROTOCOL},
+                timeout      => $params{timeout} || 15,
+                community    => $credential->{COMMUNITY},
+                username     => $credential->{USERNAME},
+                authpassword => $credential->{AUTHPASSPHRASE} // $credential->{AUTHPASSWORD},
+                authprotocol => $credential->{AUTHPROTOCOL},
+                privpassword => $credential->{PRIVPASSPHRASE} // $credential->{PRIVPASSWORD},
+                privprotocol => $credential->{PRIVPROTOCOL},
             );
         };
         die "SNMP communication error: $EVAL_ERROR" if $EVAL_ERROR;
     }
 
     my $result = getDeviceFullInfo(
-         id      => $device->{ID},
-         type    => $device->{TYPE},
-         snmp    => $snmp,
-         model   => $params->{model},
-         logger  => $self->{logger},
-         datadir => $self->{datadir}
+        id      => $device->{ID},
+        type    => $device->{TYPE},
+        snmp    => $snmp,
+        config  => $self->{config},
+        logger  => $self->{logger},
+        # Include glpi version if known so modules can verify it for supported feature
+        glpi    => $self->{target}->isType('server') ? $self->{target}->getTaskVersion('inventory') : '',
+        datadir => $self->{datadir}
     );
 
     # Inserted back device PID in result if set by server

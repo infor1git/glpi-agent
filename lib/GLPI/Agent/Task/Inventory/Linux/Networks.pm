@@ -22,8 +22,11 @@ sub doInventory {
     my $inventory = $params{inventory};
     my $logger    = $params{logger};
 
-    my $routes = getRoutingTable(command => 'netstat -nr', logger => $logger);
-    my $default = $routes->{'0.0.0.0'};
+    my $default = getDefaultGatewayFromIp(logger => $logger);
+    unless ($default) {
+        my $routes = getRoutingTable(command => 'netstat -nr', logger => $logger);
+        my $default = $routes->{'0.0.0.0'} || $routes->{'default'};
+    }
 
     my @interfaces = _getInterfaces(logger => $logger);
     foreach my $interface (@interfaces) {
@@ -129,10 +132,28 @@ sub _getInterfaces {
         }
 
         if (defined($interface->{STATUS}) && $interface->{STATUS} eq 'Up') {
-            if (has_file("/sys/class/net/$interface->{DESCRIPTION}/speed")) {
+            if (canRead("/sys/class/net/$interface->{DESCRIPTION}/speed")) {
                 my $speed = getFirstLine(
                     file => "/sys/class/net/$interface->{DESCRIPTION}/speed"
                 );
+                $interface->{SPEED} = $speed && $speed > 0 ? $speed : 0;
+            }
+            if (!$interface->{SPEED} && has_folder("/sys/class/net/$interface->{DESCRIPTION}/wireless")) {
+                my $speed;
+                if (canRun("iwconfig")) {
+                    $speed = getFirstMatch(
+                        command => "iwconfig ".$interface->{DESCRIPTION},
+                        pattern => qr/^\s+Bit Rate=(\d+)\s+Mb\/s/,
+                        logger  => $logger
+                    );
+                }
+                if (!$speed && canRun("nmcli")) {
+                    $speed = getFirstMatch(
+                        command => "nmcli -c no -g DEVICE,ACTIVE,RATE dev wifi list ifname ".$interface->{DESCRIPTION},
+                        pattern => qr/^$interface->{DESCRIPTION}:yes:(\d+)\sMbit\/s$/,
+                        logger  => $logger
+                    );
+                }
                 $interface->{SPEED} = $speed if $speed;
             }
             # On older kernels, we should try ethtool system call for speed
@@ -152,7 +173,7 @@ sub _getInterfaces {
                 } else {
                     $logger->debug_result(
                         action => 'retrieving interface speed from syscall',
-                        status => 'syscall failed'
+                        status => $infos && $infos->{ERROR} ? $infos->{ERROR} : 'syscall failed'
                     );
                 }
             }
@@ -217,15 +238,14 @@ sub _getUevent {
     my ($name) = @_;
 
     my $file = "/sys/class/net/$name/device/uevent";
-    my $handle = getFileHandle(file => $file);
-    return unless $handle;
+    my @lines = getAllLines(file => $file)
+        or return;
 
     my $info;
-    while (my $line = <$handle>) {
+    foreach my $line (@lines) {
         next unless $line =~ /^(\w+)=(\S+)$/;
         $info->{$1} = $2;
     }
-    close $handle;
 
     return $info;
 }
@@ -233,14 +253,15 @@ sub _getUevent {
 sub _parseIwconfig {
     my (%params) = @_;
 
-    my $handle = getFileHandle(
+    $params{command} = "iwconfig $params{name}" if $params{name};
+    my @lines = getAllLines(
         %params,
         command => $params{name} ? "iwconfig $params{name}" : undef
     );
-    return unless $handle;
+    return unless @lines;
 
     my $info;
-    while (my $line = <$handle>) {
+    foreach my $line (@lines) {
         $info->{version} = $1
             if $line =~ /IEEE (\S+)/;
         $info->{SSID} = $1
@@ -250,8 +271,6 @@ sub _parseIwconfig {
         $info->{BSSID} = $1
             if $line =~ /Access Point: ($mac_address_pattern)/;
     }
-
-    close $handle;
 
     return $info;
 }

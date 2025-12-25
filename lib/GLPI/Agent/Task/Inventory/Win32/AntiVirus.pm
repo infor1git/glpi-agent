@@ -100,10 +100,14 @@ sub doInventory {
             if (!$antivirus->{VERSION} || !$antivirus->{COMPANY}) {
                 my $registry = _getAntivirusUninstall($antivirus->{NAME});
                 if ($registry) {
-                    $antivirus->{VERSION} = encodeFromRegistry($registry->{"/DisplayVersion"})
-                        if (!$antivirus->{VERSION} && $registry->{"/DisplayVersion"});
-                    $antivirus->{COMPANY} = encodeFromRegistry($registry->{"/Publisher"})
-                        if (!$antivirus->{COMPANY} && $registry->{"/Publisher"});
+                    unless ($antivirus->{VERSION}) {
+                        my $version = getRegistryKeyValue($registry, "DisplayVersion");
+                        $antivirus->{VERSION} = $version if $version;
+                    }
+                    unless ($antivirus->{COMPANY}) {
+                        my $company = getRegistryKeyValue($registry, "Publisher");
+                        $antivirus->{COMPANY} = $company if $company;
+                    }
                 }
             }
 
@@ -127,6 +131,8 @@ sub doInventory {
                 _setBitdefenderInfos($antivirus,$logger);
             } elsif ($antivirus->{NAME} =~ /Norton|Symantec/i) {
                 _setNortonInfos($antivirus);
+            } elsif ($antivirus->{NAME} =~ /Trend Micro Security Agent/i) {
+                _setTrendMicroSecurityAgentInfos($antivirus);
             }
 
             $inventory->addEntry(
@@ -248,11 +254,10 @@ sub _setESETInfos {
         # wanted node and parse it as XML
         my ($xml) = $string =~ /(<ESET\s.*<\/ESET>)/;
         if ($xml) {
-            XML::TreePP->require();
             my $expiration;
             eval {
-                my $tpp = XML::TreePP->new();
-                my $tree = $tpp->parse($xml);
+                GLPI::Agent::XML->require();
+                my $tree = GLPI::Agent::XML->new(string => $xml)->dump_as_hash();
                 $expiration = $tree->{ESET}->{PRODUCT_LICENSE_FILE}->{LICENSE}->{ACTIVE_PRODUCT}->{-EXPIRATION_DATE};
             };
             # Extracted expiration is like: 2018-11-17T12:00:00Z
@@ -333,10 +338,10 @@ sub _setFSecureInfos {
     my $infos = getAllLines(file => $path);
     return unless $infos;
 
-    JSON::PP->require();
+    Cpanel::JSON::XS->require();
     my @licenses;
     eval {
-        $infos = JSON::PP::decode_json($infos);
+        $infos = Cpanel::JSON::XS::decode_json($infos);
         @licenses = @{$infos->{local}->{windows}->{secl}->{subscription}->{license_table}};
     };
     return unless @licenses;
@@ -396,11 +401,10 @@ sub _setBitdefenderInfos {
         [ 'SurveyDataInfo' ],
         sub { $_[0]->{"/SurveyDataInfo"} }
     );
-    if ($surveydata) {
-        JSON::PP->require();
+    if ($surveydata && Cpanel::JSON::XS->require()) {
         my $datas;
         eval {
-            $datas = JSON::PP::decode_json($surveydata);
+            $datas = Cpanel::JSON::XS::decode_json($surveydata);
         };
         if (defined($datas->{days_left})) {
             my @date = localtime(time+86400*$datas->{days_left});
@@ -448,6 +452,30 @@ sub _setNortonInfos {
         if ($curdefs && $curdefs =~ /^CurDefs=(.*)$/) {
             $antivirus->{BASE_VERSION} = $1;
             last;
+        }
+    }
+}
+
+sub _setTrendMicroSecurityAgentInfos {
+    my ($antivirus) = @_;
+
+    my $SecurityAgentReg = _getSoftwareRegistryKeys(
+        'TrendMicro/PC-cillinNTCorp/CurrentVersion/Misc.',
+        [ qw(InternalNonCrcPatternVer TmListen_Ver) ]
+    );
+    if ($SecurityAgentReg) {
+        $antivirus->{COMPANY} = "Trend Micro Inc.";
+        $antivirus->{VERSION} = $SecurityAgentReg->{TmListen_Ver}
+            if $SecurityAgentReg->{TmListen_Ver};
+        if ($SecurityAgentReg->{InternalNonCrcPatternVer}) {
+            my $version = hex($SecurityAgentReg->{InternalNonCrcPatternVer});
+            my ($major, $minor, $rev) = (
+                $version/100000,
+                $version%100000/100,
+                $version%100
+            );
+            $antivirus->{BASE_VERSION} = sprintf("%d.%03d.%02d", $major, $minor, $rev)
+                if $major;
         }
     }
 }

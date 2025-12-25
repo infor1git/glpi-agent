@@ -5,7 +5,7 @@ use warnings;
 
 use parent 'GLPI::Agent::Task::Inventory::Module';
 
-use JSON::PP;
+use Cpanel::JSON::XS;
 
 use GLPI::Agent::Tools;
 use GLPI::Agent::Tools::Virtualization;
@@ -43,14 +43,11 @@ sub doInventory {
 sub  _getContainers {
     my (%params) = @_;
 
-
-    my $handle = getFileHandle(%params);
-
-    return unless $handle;
+    my @lines = getAllLines(%params)
+        or return;
 
     my @containers;
-    while (my $line = <$handle>) {
-        chomp $line;
+    foreach my $line (@lines) {
         my @info = split $separator, $line;
         next unless $#info == $#wantedInfos;
 
@@ -72,7 +69,6 @@ sub  _getContainers {
         push @containers, $container;
 
     }
-    close $handle;
 
     return @containers;
 }
@@ -84,8 +80,7 @@ sub _getStatus {
     my $lines = getAllLines(%params);
     my $status = '';
     eval {
-        my $coder = JSON::PP->new;
-        my $containerData = $coder->decode($lines);
+        my $containerData = decode_json $lines;
         $status =
             ((ref $containerData eq 'ARRAY' && $containerData->[0]->{State}->{Running})
                     || (ref $containerData eq 'HASH' && $containerData->{State}->{Running})) ?

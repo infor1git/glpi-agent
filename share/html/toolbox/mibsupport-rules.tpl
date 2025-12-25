@@ -1,9 +1,9 @@
     <p class='infos'>
-      <br/>{
+      <em class='hint'>{
   use URI::Escape;
   Text::Template::fill_in_file("$template_path/mibsupport-rules-infos.tpl", HASH => $hash)
-    || "Error loading mibsupport-rules-infos.tpl template: $Text::Template::ERROR"
-}      <br/>
+    || "Error loading mibsupport-rules-infos.tpl template: $Text::Template::ERROR"}
+      </em>
     </p>
     <table>
       <thead>
@@ -61,8 +61,8 @@
       </tbody>
     </table>
     <div class='select-row'>
-      <div class='arrow-left'></div>
-      <input class='submit-secondary' type='submit' name='submit/delete' value='{_"Delete"}'>
+      <i class='ti ti-corner-left-up arrow-left'></i>
+      <button class='secondary' type='submit' name='submit/delete' value='1' alt='{_"Delete"}'><i class='secondary ti ti-trash-filled'></i>{_"Delete"}</button>
     </div>
     <hr/>
-    <input class='big-button' type='submit' name='submit/add/rule' value='{_"Add new rule"}'>
+    <button class='big-button' type='submit' name='submit/add/rule' value='1' alt='{_("Add new rule")}'><i class='primary ti ti-plus'></i>{_("Add new rule")}</button>

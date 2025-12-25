@@ -3,11 +3,12 @@
 ERROR: ERREUR
 
 New IP range: Nouvelle plage IP
+Rename IP range: Renommage de plage IP
 No ip range provided name: Pas de nom de plage ip fourni
 An entry still exists with that name: Une entrée existe déjà avec ce nom
-Start ip is mandatory: L'ip de début est mandataire
+Start ip is mandatory: L'ip de début est obligatoire
 Wrong start ip format: Mauvais format pour l'ip de début
-End ip is mandatory: L'ip de fin est mandataire
+End ip is mandatory: L'ip de fin est obligatoire
 Wrong end ip format: Mauvais format pour l'ip de fin
 Can't create entry without name: Impossible de créer une entrée sans nom
 IP range credential adding: Ajoût d'identifiant pour une plage IP
@@ -26,15 +27,21 @@ A network scan is still running for that IP range: Un scan réseau tourne déjà
 No such credentials: Pas de tels identifiants
 Missing version on credentials: La version manque sur les identifiants
 Missing username on credentials: Le nom d'utilisateur manque sur les identifiants
+Missing password on credentials: Le mot de passe manque sur les identifiants
 A local inventory is still running: Un inventaire local est déjà en cours
 Unsupported IP range: Plage IP non supportée
+Can't delete used IP range: Impossible de supprimer une plage IP utilisée
 
 New credential: Nouvel identifiant
 SNMP version is mandatory: La version SNMP est obligatoire
 Wrong SNMP version: Mauvaise version SNMP
 Community is mandatory with version: La communauté est obligatoire avec cette version
-Username is mandatory with SNMP v3: Le nom est obligatoire avec SNMP v3
+Username is mandatory with SNMP v3: Le nom d'utilisateur est obligatoire avec SNMP v3
 Credential update: Mise à jour de l'identifiant
+Rename credential: Renommage de l'identifiant
+Delete credential: Suppression d'identifiant
+No credential selected: Pas d'identifiant sélectionné
+Can't delete used credential: Impossible de supprimer un identifiant utilisé
 
 Deleting results: Suppression de résultats
 No result selected: Pas de résultat sélectionné
@@ -64,3 +71,50 @@ New MIBSupport match: Nouvelle correspondance de support MIB
 Update MIBSupport match: Mise à jour de correspondance de support MIB
 Update ruleset: Mise à jour du jeu de règle
 Remove ruleset: Suppression du jeu de règle
+
+New remote: Nouvel inventaire distant
+Update remote: Mise à jour inventaire distant
+Not authorized to manage remotes: Vous n'avez pas les droits pour gérer les inventaires distants
+Can't create entry without target: Impossible de créer une entrée sans cible
+Can't update entry without target: Impossible de mettre à jour une entrée sans cible
+Can't update entry without source target: Impossible de mettre à jour une entrée sans cible source
+No such remote for target: Inventaire distant non disponible pour la cible
+
+Unsupported remote inventory type: Type d'inventaire distant non supporté
+Username is mandatory for remote inventory types: Un nom d'utilisateur est obligatoire pour les types inventaire distant
+Password is mandatory for this remote inventory type: Un mot de passe est obligatoire pour ce type d'inventaire distant
+
+Invalid SNMP port: Port SNMP invalide
+Invalid SSH port: Port SSH invalide
+Invalid WINRM port: Port WINRM invalide
+Invalid SNMP protocol: Protocole SNMP invalide
+Port definition ignored: Définition de port ignorée
+Unsupported mode for SSH removeinventory: Mode non supporté pour l'inventaire distant SSH
+Unsupported mode for WINRM removeinventory: Mode non supporté pour l'inventaire distant WINRM
+
+Task has no type: La tâche n'a pas de type
+Task has not a supported type: La tâche n'a pas un type supporté
+New task: Nouvelle tâche
+Update task: Mise à jour d'une tâche
+Unsupported task type: Type de tâche non supportée
+Can't delete enabled task: Impossible d'effacer la tâche active
+Rename task: Renommer la tâche
+No such task: Pas de telle tâche
+Unsupported target: Cible non supportée
+Start task: Démarrer la tâche
+
+New scheduling: Nouvelle planification
+Scheduling update: Mise à jour de la planification
+Rename scheduling: Renommage de planification
+No such scheduling: Pas de telle planification
+Delete scheduling: Suppression de planification
+No scheduling selected: Pas de planification sélectionnée
+Scheduling type is mandatory: Le type de planification est obligatoire
+Unsupported scheduling type: Type de planification non supporté
+Can't delete used scheduling: Impossible de supprimer une planification utilisée
+Unsupported delay time: Durée de délai non supportée
+Unsupported delay time unit: Unité de délai non supportée
+Minimum delay time is one minute: Le délai minimum est d'une minute
+Unsupported week day: Jour de la semaine non supporté
+Invalid timeslot start time: Heure de début du créneau horaire invalide
+Invalid timeslot duration: Durée de créneau horaire invalide

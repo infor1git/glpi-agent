@@ -1,9 +1,8 @@
 # This file is not read but should reference any string that could be translated
 
 IP range name:
-First ip:
-Last ip:
 
+Add IP range:
 Add new IP range:
 Edit &laquo;&nbsp;%s&nbsp;&raquo; ip range:
 IP range start:
@@ -11,5 +10,9 @@ IP range end:
 Associated credentials:
 Add credential:
 Remove credential:
-Return to IP ranges:
-Associated credentials:
+
+SNMP version:
+Community:
+Username:
+
+No IP range defined:

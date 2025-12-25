@@ -10,7 +10,7 @@ use base "GLPI::Agent::HTTP::Server::Plugin";
 
 use GLPI::Agent::Tools;
 
-our $VERSION = "1.0";
+our $VERSION = "1.1";
 
 sub log_prefix {
     return "[ssl server plugin] ";
@@ -27,6 +27,9 @@ sub defaults {
         # SSL support
         ssl_cert_file       => undef,
         ssl_key_file        => undef,
+        ssl_cipher          => undef,
+        # Supported by class GLPI::Agent::HTTP::Server::Plugin
+        forbid_not_trusted => "no",
     };
 }
 
@@ -43,28 +46,27 @@ sub init {
         if $self->config('ssl_cert_file');
     $self->{'key_file'} = File::Spec->rel2abs($self->config('ssl_key_file'),$self->confdir())
         if $self->config('ssl_key_file');
+    $self->{'cipher'} = $self->config('ssl_cipher')
+        if $self->config('ssl_cipher');
 
     # Check certificate file is set
     unless ($self->{'cert_file'}) {
         $self->error("Plugin enabled without certificate file set in configuration");
-        $self->disable();
-        $self->info("Plugin disabled on wrong configuration");
+        $self->disable("Plugin disabled on wrong configuration");
         return;
     }
 
     # Check certificate file exists
     unless (-e $self->{'cert_file'}) {
         $self->error("Plugin enabled but $self->{'cert_file'} certificate file is missing");
-        $self->disable();
-        $self->info("Plugin disabled on wrong configuration");
+        $self->disable("Plugin disabled on wrong configuration");
         return;
     }
 
     # Check key file exists if set
     if ($self->{'key_file'} && ! -e $self->{'key_file'}) {
         $self->error("Plugin enabled but $self->{'key_file'} key file is missing");
-        $self->disable();
-        $self->info("Plugin disabled on wrong configuration");
+        $self->disable("Plugin disabled on wrong configuration");
         return;
     }
 
@@ -79,13 +81,13 @@ sub init {
     IO::Socket::SSL->require();
     if ($EVAL_ERROR) {
         $self->error("HTTPD can't load SSL support: $EVAL_ERROR");
-        $self->disable();
-        $self->info("Plugin disabled on wrong configuration");
+        $self->disable("Plugin disabled on wrong configuration");
         return;
     }
 
     $self->debug2("Certificate file: $self->{'cert_file'}");
     $self->debug2("Key file:         $self->{'key_file'}");
+    $self->debug2("Cipher:           ".($self->{cipher}//"n/a"));
 
     # Activate SSL Debug if Stderr is in backends
     my $DEBUG_SSL = 0;
@@ -128,6 +130,7 @@ sub new {
     eval {
         # SSL upgrade client
         IO::Socket::SSL->start_SSL($client,
+            SSL_version     => $plugin->{cipher} // "",
             SSL_server      => 1,
             SSL_cert_file   => $plugin->{cert_file},
             SSL_key_file    => $plugin->{key_file},
@@ -145,6 +148,13 @@ sub new {
     $plugin->debug("HTTPD started new SSL session");
 
     bless $client, $class;
+}
+
+sub close {
+    my ($self) = @_;
+
+    # Don't shutdown SSL on close to avoid issue with Proxy server plugin as it uses forking
+    $self->SUPER::close(SSL_no_shutdown => 1);
 }
 
 1;
@@ -177,6 +187,10 @@ This is a server plugin to enable SSL support on listening ports.
 =item ssl_key_file     No default
                        The path to SSL private key to use. It can be relative to
                        the current configuration folder.
+
+=item ssl_cipher       No default
+                       The cipher or SSL version to use or a list of cipher to
+                       disable. GLPI agent use the system default if not set.
 
 =back
 

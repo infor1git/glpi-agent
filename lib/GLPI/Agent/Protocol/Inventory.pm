@@ -5,6 +5,10 @@ use warnings;
 
 use parent 'GLPI::Agent::Protocol::Message';
 
+use DateTime;
+use English qw(-no_match_vars);
+use Cpanel::JSON::XS;
+
 use GLPI::Agent::Tools;
 
 use constant date_qr            => qr/^[0-9]{4}-[0-9]{2}-[0-9]{2}$/;
@@ -79,6 +83,10 @@ my %normalize = (
     },
     MEMORIES         => {
         integer         => [ qw/CAPACITY NUMSLOTS/ ],
+        boolean         => [ qw/REMOVABLE/ ],
+    },
+    MONITORS         => {
+        string          => [ qw/DESCRIPTION SERIAL ALTSERIAL/ ],
     },
     NETWORKS         => {
         required        => [ qw/DESCRIPTION/ ],
@@ -130,6 +138,11 @@ my %normalize = (
         required        => [ qw/NAME VMTYPE/ ],
         integer         => [ qw/MEMORY VCPU/ ],
         lowercase       => [ qw/STATUS VMTYPE/ ],
+        pattern         => [
+            [
+                STATUS  => '^(running|blocked|idle|paused|shutdown|crashed|dying|off)$'
+            ]
+        ]
     },
     LICENSEINFOS     => {
         boolean         => [ qw/TRIAL/ ],
@@ -165,19 +178,51 @@ sub mergeContent {
 
     return unless ref($params{content}) eq 'HASH';
 
-    my $content = $self->get("content")
-        or return;
+    $self->{_merge_content} = $params{content};
+}
 
-    foreach my $key (keys(%{$params{content}})) {
-        $content->{$key} = $params{content}->{$key};
+sub _setupStandardization {
+    my ($self, $version) = @_;
+
+    # Parse version setting default support to 10.0.0
+    my ($major, $minor, $rev, $suffix) = (10, 0, 0, '');
+    if ($version && $version =~ /^(\d+)\.(\d+)\.(\d+)(?:-(.*))$/) {
+        $major = int($1);
+        $minor = int($2);
+        $rev   = int($3);
+        $suffix = $4 if defined($4);
+    }
+
+    if ($suffix eq 'dev') {
+        $self->{logger}->debug2(
+            "inventory format: server is a development version\n" .
+            "Be sure to use latest GLPI Agent nightly build being aware your JSON inventory\n" .
+            "may be rejected by server, and in that case, you probably just have to update the\n" .
+            "server-side 'inventory.schema.json' file manually.\n" .
+            "If this is not sufficient, please, can you open an issue on glpi-agent github project ?"
+        );
+    } elsif ($suffix eq 'beta') {
+        $self->{logger}->debug2(
+            "inventory format: server is a beta version\n" .
+            "Be sure to use latest GLPI Agent nightly build.\n" .
+            "If the server rejects the inventory, please, report an issue on glpi-agent github project."
+        );
+        if ($major == 10 && !$minor && !$rev) {
+            # GLPI 10.0.0-beta supported specs
+            delete $normalize{MEMORIES}->{boolean};
+            $normalize{MEMORIES}->{string} = [ qw/REMOVABLE/ ];
+        }
     }
 }
 
 sub normalize {
-    my ($self) = @_;
+    my ($self, $version) = @_;
 
     my $content = $self->get("content")
         or return;
+
+    # Fix %normalize structure againt server version
+    $self->_setupStandardization($version);
 
     # Normalize to follow JSON specs
     foreach my $entrykey (keys(%normalize)) {
@@ -276,6 +321,36 @@ sub normalize {
     $self->_transform();
 }
 
+sub converted {
+    my ($self) = @_;
+
+    my $message = $self->SUPER::converted()
+        or return;
+
+    my $content = $message->{content}
+        or return $message;
+
+    # Merge content to support additional-content option
+    my $merge = $self->{_merge_content};
+    if ($merge) {
+        foreach my $key (keys(%{$merge})) {
+            if (! $content->{$key} || ref($merge->{$key}) ne 'HASH') {
+                $content->{$key} = $merge->{$key};
+            } else {
+                if (ref($content->{$key}) eq 'HASH') {
+                    foreach my $leaf (keys(%{$merge->{$key}})) {
+                        $content->{$key}->{$leaf} = $merge->{$key}->{$leaf};
+                    }
+                } elsif ($self->{logger}) {
+                    $self->{logger}->debug("content merge: skipping '$key' due to content type mismatch");
+                }
+            }
+        }
+    }
+
+    return $message;
+}
+
 sub _recursive_not_defined_cleanup {
     my ($entry) = @_;
 
@@ -298,6 +373,16 @@ sub _recursive_not_defined_cleanup {
 sub _norm {
     my ($self, $norm, $entry, $value, $entrykey) = @_;
 
+    # pattern normalization is special as $value should be an array ref in that case
+    if ($norm eq "pattern" && ref($value) eq 'ARRAY') {
+        my ($key, $pattern) = @{$value};
+        return if !defined($entry->{$key}) || $entry->{$key} =~ /$pattern/i;
+        $self->{logger}->debug("inventory format: Removing $entrykey $key value as not matching /$pattern/ regexp: '$entry->{$key}'")
+            if $self->{logger};
+        delete $entry->{$key};
+        return;
+    }
+
     return unless defined($entry->{$value});
 
     if ($norm eq "integer" && $entry->{$value} =~ /^\d+$/) {
@@ -306,7 +391,7 @@ sub _norm {
     } elsif ($norm eq "string") {
         $entry->{$value} .= "" ;
     } elsif ($norm eq "boolean") {
-        $entry->{$value} = $entry->{$value} ? JSON::true : JSON::false ;
+        $entry->{$value} = $entry->{$value} ? Cpanel::JSON::XS::true : Cpanel::JSON::XS::false ;
     } elsif ($norm eq "lowercase") {
         $entry->{$value} = lc($entry->{$value});
     } elsif ($norm eq "uppercase") {
@@ -330,7 +415,7 @@ sub _norm {
             delete $entry->{$value};
         }
     } elsif ($norm eq "dateordatetime" && $entry->{$value} !~ dateordatetime_qr) {
-        my $dateordatetime = _canonicalDateordatetime($entry->{$value});
+        my $dateordatetime = _canonicalDateordatetime($entry->{$value}, $value =~ /^BDATE$/ ? 1 : 0);
         if (defined($dateordatetime)) {
             $entry->{$value} = $dateordatetime;
         } else {
@@ -345,26 +430,65 @@ sub _norm {
     }
 }
 
+sub _ymd {
+    my ($date) = @_;
+
+    ## no critic (ExplicitReturnUndef)
+
+    return unless $date && $date =~ m{^(\d{4})-(\d{2})-(\d{2})$};
+
+    my $ymd;
+    eval {
+        my $dt = DateTime->new(
+            year    => $1,
+            month   => $2,
+            day     => $3,
+        );
+        $ymd = $dt->ymd;
+    };
+    if ($EVAL_ERROR) {
+        # Try inverting day and month in the case the date is malformed
+        eval {
+            my $dt = DateTime->new(
+                year    => $1,
+                month   => $3,
+                day     => $2,
+            );
+            $ymd = $dt->ymd;
+        };
+    }
+
+    return $ymd;
+}
+
 sub _canonicalDate {
     my ($date) = @_;
     return unless defined($date);
-    return "$3-$2-$1" if $date =~ /^(\d{2})\/(\d{2})\/(\d{4})/;
-    return $1 if $date =~ /^(\d{4}-\d{2}-\d{2})/;
+    return _ymd("$3-$2-$1") if $date =~ /^(\d{2})\/(\d{2})\/(\d{4})/;
+    return _ymd($1) if $date =~ /^(\d{4}-\d{2}-\d{2})/;
     return;
 }
 
 sub _canonicalDatetime {
     my ($datetime) = @_;
     return unless defined($datetime);
-    return "$3-$2-$1 00:00:00" if $datetime =~ /^(\d{2})\/(\d{2})\/(\d{4})$/;
-    return "$datetime:00" if $datetime =~ /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2})$/;
+    if ($datetime =~ /^(\d{2})\/(\d{2})\/(\d{4})$/) {
+        my $ymd = _ymd("$3-$2-$1");
+        return "$ymd 00:00:00" if $ymd;
+    } elsif ($datetime =~ /^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2})$/) {
+        my $time = "$2:00";
+        my $ymd = _ymd($1);
+        return "$ymd $time" if $ymd;
+    }
     return;
 }
 
 sub _canonicalDateordatetime {
-    my ($date) = @_;
+    my ($date, $inverted_month_and_day) = @_;
     return unless defined($date);
-    return "$3-$2-$1" if $date =~ /^(\d{2})\/(\d{2})\/(\d{4})$/;
+    if ($date =~ /^(\d{2})\/(\d{2})\/(\d{4})$/) {
+        return $inverted_month_and_day ? _ymd("$3-$1-$2") : _ymd("$3-$2-$1");
+    }
     return;
 }
 
@@ -394,6 +518,8 @@ sub _transform {
     my $storages = $content->{STORAGES};
     if (ref($storages) eq 'ARRAY') {
         map {
+            $self->{logger}->debug2("Replacing $_->{SERIAL} storage serial by $_->{SERIALNUMBER}")
+                if exists($_->{SERIAL}) && $_->{SERIAL} ne $_->{SERIALNUMBER};
             $_->{SERIAL} = delete $_->{SERIALNUMBER}
         } grep { exists($_->{SERIALNUMBER}) } @{$storages};
     }

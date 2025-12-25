@@ -5,6 +5,7 @@ use warnings;
 
 use GLPI::Agent::Tools;
 use GLPI::Agent::Tools::Virtualization;
+use GLPI::Agent::Tools::UUID;
 
 sub new {
     my ($class, %params) = @_;
@@ -204,18 +205,37 @@ sub getControllers {
 sub _getNic {
     my ($ref, $isVirtual) = @_;
 
-    return {
-        DESCRIPTION => $ref->{device},
-        DRIVER      => $ref->{driver},
-        IPADDRESS   => $ref->{spec}{ip}{ipAddress},
-        IPMASK      => $ref->{spec}{ip}{subnetMask},
-        MACADDR     => $ref->{mac} || $ref->{spec}{mac},
-        MTU         => $ref->{spec}{mtu},
-        PCISLOT     => $ref->{pci},
-        STATUS      => $ref->{spec}{ip}{ipAddress} ? 'Up' : 'Down',
+    my $nic = {
         VIRTUALDEV  => $isVirtual,
-        SPEED       => $ref->{spec}{linkSpeed}{speedMb},
+    };
+
+    my %binding = qw(
+        DESCRIPTION device
+        DRIVER      driver
+        PCISLOT     pci
+        MACADDR     mac
+    );
+
+    while (my ($key, $dump) = each %binding) {
+        next unless $ref->{$dump};
+        $nic->{$key} = $ref->{$dump};
     }
+
+    my $spec = $ref->{spec};
+    if ($spec) {
+        my $ip = $spec->{ip};
+        if ($ip) {
+            $nic->{IPADDRESS} = $ip->{ipAddress}  if $ip->{ipAddress};
+            $nic->{IPMASK}    = $ip->{subnetMask} if $ip->{subnetMask};
+        }
+        $nic->{MACADDR} = $spec->{mac} if !$nic->{MACADDR} && $spec->{mac};
+        $nic->{MTU}     = $spec->{mtu} if $spec->{mtu};
+        $nic->{SPEED}   = $spec->{linkSpeed}->{speedMb}
+            if $spec->{linkSpeed} && $spec->{linkSpeed}->{speedMb};
+    }
+    $nic->{STATUS} = $nic->{IPADDRESS} ? 'Up' : 'Down';
+
+    return $nic;
 }
 
 sub getNetworks {
@@ -228,7 +248,6 @@ sub getNetworks {
     foreach my $nicType (qw/vnic pnic consoleVnic/)  {
         foreach (_asArray($self->{hash}[0]{config}{network}{$nicType}))
         {
-
             next if $seen->{$_->{device}}++;
             my $isVirtual = $nicType eq 'vnic'?1:0;
             push @networks, _getNic($_, $isVirtual);
@@ -272,7 +291,7 @@ sub getStorages {
                 $serialnumber .= $_ foreach ( @{ $altName->{data} } );
             }
         }
-        if ( $entry->{capacity}{blockSize} && $entry->{capacity}{block} ) {
+        if ($entry->{capacity} && $entry->{capacity}->{blockSize} && $entry->{capacity}->{block}) {
             $size = int(($entry->{capacity}{blockSize} *$entry->{capacity}{block})/1024/1024);
         }
         my $manufacturer;
@@ -333,7 +352,7 @@ sub getDrives {
             TOTAL  => int( ( $_->{volume}{capacity} || 0 ) / ( 1000 * 1000 ) ),
             TYPE   => $_->{mountInfo}{path},
             VOLUMN => $volumn,
-            NAME   => $_->{volume}{name},
+            LABEL  => $_->{volume}{name},
             FILESYSTEM => lc( $_->{volume}{type} )
           };
     }
@@ -373,17 +392,24 @@ sub getVirtualMachines {
             next;
         }
 
-        push @virtualMachines,
-          {
+        # Compute serialnumber set in bios by ESX
+        my $uuid = $machine->{summary}{config}{uuid};
+        my $vmInventory = {
             NAME    => $machine->{name},
             STATUS  => $status,
-            UUID    => $machine->{summary}{config}{uuid},
+            UUID    => $uuid,
             MEMORY  => $machine->{summary}{config}{memorySizeMB},
             VMTYPE  => 'VMware',
             VCPU    => $machine->{summary}{config}{numCpu},
             MAC     => join( '/', @mac ),
             COMMENT => $comment
-          };
+        };
+        if (is_uuid_string($uuid)) {
+            my @uuid_parts = unpack("A2A2A2A2xA2A2xA2A2xA2A2xA2A2A2A2A2A2", $uuid);
+            $vmInventory->{SERIAL} = "VMware-".join(' ', @uuid_parts[0..7]).'-'.join(' ', @uuid_parts[8..15]);
+        }
+
+        push @virtualMachines, $vmInventory;
     }
 
     return @virtualMachines;

@@ -13,7 +13,6 @@ use LWP::UserAgent;
 use Pod::Usage;
 use Getopt::Long;
 use Digest::SHA;
-use XML::TreePP;
 use Time::HiRes qw(gettimeofday);
 use File::Which;
 use File::Find;
@@ -21,6 +20,7 @@ use File::Find;
 use GLPI::Agent::Config;
 use GLPI::Agent::Logger;
 use GLPI::Agent::Storage;
+use GLPI::Agent::XML;
 use GLPI::Agent::Task::RemoteInventory::Remote;
 
 our $VERSION = "1.0";
@@ -61,12 +61,22 @@ GetOptions(
     'ca-cert-file=s',
     'ca-cert-dir=s',
     'ssl-cert-file=s',
+    'ssl-fingerprint=s',
+    'stricthostkeychecking=s',
     'no-ssl-check|S',
     'no-check|C',
     'no-header|H',
+    'vardir=s',
 ) or pod2usage(-verbose => 0);
 
 pod2usage(-verbose => 0, -exitstatus => 0) if $options->{help};
+
+if ($options->{vardir}) {
+    die "Wrong vardir option: $!\n" unless -d $options->{vardir};
+    $setup{vardir} = $options->{vardir};
+} else {
+    $options->{vardir} = $setup{vardir};
+}
 
 my ($cmd, @params) = @ARGV;
 if ($cmd) {
@@ -186,7 +196,6 @@ sub add {
     if ($options->{server} || $options->{local}) {
         my $config = GLPI::Agent::Config->new(
             options => $options,
-            vardir  => $setup{vardir},
         );
         my $targets = $config->getTargets();
         foreach my $target (@{$targets}) {
@@ -211,6 +220,12 @@ sub add {
         );
         $remote->supported()
             or next;
+
+        $remote->prepare();
+
+        # Eventually add StrictHostKeyChecking ssh options
+        $remote->options(["StrictHostKeyChecking=".$options->{'stricthostkeychecking'}])
+            if $options->{'stricthostkeychecking'} && $remote->protocol() eq 'ssh';
 
         my $checkerror;
         $checkerror = $remote->checking_error() unless $options->{'no-check'};
@@ -270,9 +285,15 @@ sub delete {
             my $storage = $list->{storage};
             my $remotes = $storage->restore( name => 'remotes' ) // {};
             my $id = $list->{remote}->deviceid();
+            ($id) = grep { $remotes->{$_}->{deviceid} eq $id } keys(%{$remotes})
+                unless $remotes->{$id};
             my $deleted = delete $remotes->{$id}
                 or warn "No such deviceid found: $id\n";
-            $storage->save( name => 'remotes', data => $remotes );
+            if (keys(%{$remotes})) {
+                $storage->save( name => 'remotes', data => $remotes );
+            } else {
+                $storage->remove( name => 'remotes' );
+            }
             print "$id remote agent deleted from $list->{target}->{id}\n" if $deleted;
         }
     }
@@ -331,6 +352,7 @@ sub get_targets {
                 my $storage = GLPI::Agent::Storage->new(
                     directory   => $File::Find::dir,
                     logger      => $logger,
+                    read_only   => 1,
                 );
 
                 # Check target from storage
@@ -346,7 +368,15 @@ sub get_targets {
                         storage => $storage,
                     };
                     my $id = $target->{id};
-                    $targets{$id} = $current unless $targets{$id};
+                    # Update id number in the case the id is still used
+                    if ($targets{$id}) {
+                        my ($base, $num) = $id =~ /^(\w+)(\d+)$/;
+                        while ($targets{$id}) {
+                            $id = $base . (++$num);
+                        }
+                        $target->{id} = $id;
+                    }
+                    $targets{$id} = $current;
                 }
             },
             no_chdir => 1
@@ -503,13 +533,11 @@ sub agent {
         }
 
         my $deviceid;
-        eval {
-            my $tpp = XML::TreePP->new();
-            my $tree = $tpp->parse($content);
+        $xml = GLPI::Agent::XML->new(string => $content);
+        my $tree = $xml->dump_as_hash();
+        if ($tree && $tree->{REQUEST} && $tree->{REQUEST}->{DEVICEID}) {
             $deviceid = $tree->{REQUEST}->{DEVICEID};
-        };
-
-        unless ($deviceid) {
+        } else {
             warn "$host: No deviceid found in returned inventory output, skipping\n";
             next;
         }
@@ -557,8 +585,12 @@ glpi-remote [options] [--server server|--local path] [command] [command options]
     --ssh               connect using SSH
     --ssl               connect using SSL (winrm or with agent sub-command)
     --no-ssl-check      do not check agent SSL certificate (winrm or agent sub-command)
+    --stricthostkeychecking <yes|no|off|accept-new|ask> (defaults to 'accept-new')
+                        use given option when checking hostkey during ssh remote add
     --ca-cert-dir <PATH> CA certificates directory
     --ca-cert-file <FILE> CA certificates file (winrm or for agent sub-command)
+    --ssl-fingerprint <FINGERPRINT>
+                        Trust server certificate if its SSL fingerprint matches the given one
     --ssl-cert-file     Client certificate file (winrm)
     -u --user           authentication user
     -P --password       authentication password
@@ -572,6 +604,7 @@ glpi-remote [options] [--server server|--local path] [command] [command options]
     -A --add            add scanned remotes to target so they always be inventoried
                         by RemoteInventory task
     -U --useragent      set used HTTP User-Agent for requests
+    --vardir <PATH>     use specified path as storage folder for agent persistent datas
 
   Target definition options:
     -s --server=<URI>   agent will send tasks result to that server
@@ -610,19 +643,20 @@ glpi-remote [options] [--server server|--local path] [command] [command options]
     glpi-remote list
     glpi-remote list targets
     glpi-remote add ssh://admin:pass@192.168.43.237
+    glpi-remote add ssh://admin:pass@192.168.43.237 --stricthostkeychecking=no
     glpi-remote add ssh://admin:pass@192.168.43.238 --no-check
     glpi-remote add winrm://admin:pass@192.168.48.250 --no-check --target server0
     glpi-remote delete 1
     glpi-remote scan 192.168.43.1 192.168.43.254
-    glpi-remote scan 10.0.0.1 10.0.10.254 --inventory -s https://myglpi/front/inventory.php
+    glpi-remote scan 10.0.0.1 10.0.10.254 --inventory -s https://myglpi/
     glpi-remote scan 10.0.0.1 10.0.10.254 --inventory -l /var/tmp/remotes
     glpi-remote scan --inventory
-    glpi-remote scan 192.168.48.99 | glpi-injector -url https://myglpi/front/inventory.php
+    glpi-remote scan 192.168.48.99 | glpi-injector -url https://myglpi/
 
   Examples for agent command:
     glpi-remote -T strong-shared-secret agent 192.168.43.236
     glpi-remote -v -T strong-shared-secret agent 192.168.43.237 | \
-        glpi-injector -url https://myglpi/front/inventory.php
+        glpi-injector -url https://myglpi/
     glpi-remote -T strong-shared-secret -d /var/remote agent 192.168.43.236 192.168.43.237
 
 =head1 DESCRIPTION
@@ -690,8 +724,6 @@ Set the timeout for network requests (defaults to 10 seconds).
 
 =item B<-p>, B<--port>=I<LIST>
 
-Do not contact the target before next scheduled time.
-
 A list of ports used when making a scan and to discover remote computers. The defaults is to
 scan the standard ssh port and winrm ports: I<22,5985,5986>.
 
@@ -724,7 +756,7 @@ Do not check server SSL certificate.
 
 Use I<USER> for remote authentication.
 
-=item B<-p>, B<--password>=I<PASSWORD>
+=item B<-P>, B<--password>=I<PASSWORD>
 
 Use I<PASSWORD> for remote authentication.
 

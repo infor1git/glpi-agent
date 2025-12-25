@@ -6,25 +6,23 @@ use parent 'GLPI::Agent::HTTP::Client';
 
 use English qw(-no_match_vars);
 
-use JSON::PP;
+use Cpanel::JSON::XS;
 use HTTP::Request;
 use HTTP::Headers;
 use HTTP::Cookies;
 use URI::Escape;
 
-my $log_prefix = "[http client] ";
+use GLPI::Agent::Tools;
+
+use constant    _log_prefix => "[http client] ";
 
 sub new {
     my ($class, %params) = @_;
 
-    my $self = $class->SUPER::new(%params);
-
-# Stack the messages sent in order to be able to check the
-# correctness of the behavior with the test-suite
-    if ($params{debug}) {
-        $self->{debug} = 1;
-        $self->{msgStack} = []
-    }
+    my $self = $class->SUPER::new(
+        no_compress => 1,
+        %params
+    );
 
     $self->{_cookies} = HTTP::Cookies->new ;
 
@@ -46,8 +44,6 @@ sub _prepareVal {
 
 sub send { ## no critic (ProhibitBuiltinHomonyms)
     my ($self, %params) = @_;
-
-    push @{$self->{msgStack}}, $params{args} if $self->{debug};
 
     my $url = ref $params{url} eq 'URI' ?
         $params{url} : URI->new($params{url});
@@ -86,7 +82,7 @@ sub send { ## no critic (ProhibitBuiltinHomonyms)
     if ($method eq 'GET') {
         $request = HTTP::Request->new($method => $url);
     } else {
-        $self->{logger}->debug2($log_prefix."POST: ".$urlparams) if $self->{logger};
+        $self->{logger}->debug2(_log_prefix."POST: ".$urlparams) if $self->{logger};
         my $headers = HTTP::Headers->new(
             'Content-Type' => 'application/x-www-form-urlencoded',
             'Referer'      => $referer
@@ -107,24 +103,31 @@ sub send { ## no critic (ProhibitBuiltinHomonyms)
 
     my $content = $response->content();
     unless ($content) {
-        $self->{logger}->error( $log_prefix . "Got empty response" )
+        $self->{logger}->error( _log_prefix . "Got empty response" )
             if $self->{logger};
         return;
     }
 
     my $answer;
     eval {
-        my $decoder = JSON::PP->new
-            or die "Can't use JSON::PP decoder: $!";
-
-        $answer = $decoder->decode($content);
+        $answer = decode_json $content;
     };
 
-    if ($EVAL_ERROR) {
+    if ($EVAL_ERROR && $self->{logger}) {
         my @lines = split(/\n/, $content);
+        my $starting = '';
+        while (@lines && length($starting) < 120) {
+            my $line = getSanitizedString(shift(@lines));
+            if (length($line) < 120) {
+                $starting .= $line . "\n";
+            } else {
+                $starting .= substr($line, 0, 120) . " ...\n";
+            }
+        }
         $self->{logger}->error(
-            $log_prefix . "Can't decode JSON content, starting with $lines[0]"
-        ) if $self->{logger};
+            _log_prefix . "Can't decode JSON content, starting with: " .
+            $starting . (@lines ? "..." : "")
+        ) if $starting;
         return;
     }
 

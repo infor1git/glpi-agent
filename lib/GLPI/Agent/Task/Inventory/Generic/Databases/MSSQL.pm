@@ -39,6 +39,14 @@ sub _getDatabaseService {
     my $credentials = delete $params{credentials};
     return [] unless $credentials && ref($credentials) eq 'ARRAY';
 
+    # Add SQLExpress default credential when trying default credential
+    if (@{$credentials} == 1 && !keys(%{$credentials->[0]})) {
+        push @{$credentials}, {
+            type    => "login_password",
+            socket  => "localhost\\SQLExpress",
+        };
+    }
+
     my @dbs = ();
 
     # Support sqlcmd on linux with standard full path for command from mssql-tools package
@@ -55,14 +63,20 @@ sub _getDatabaseService {
         )
             or next;
 
+        my $name =_runSql(
+            sql     => "SELECT \@\@servicename",
+            %params
+        )
+            or next;
+
         my $version =_runSql(
             sql     => "SELECT \@\@version",
             %params
         )
             or next;
-        my ($manufacturer, $name) = $version =~ /^
+        my ($manufacturer) = $version =~ /^
             (Microsoft) \s+
-            (SQL \s+ Server \s+ \d+)
+            SQL \s+ Server \s+ \d+
         /xi
             or next;
 

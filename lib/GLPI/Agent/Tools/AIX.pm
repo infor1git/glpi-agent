@@ -7,15 +7,12 @@ use parent 'Exporter';
 use English qw(-no_match_vars);
 
 use GLPI::Agent::Tools;
-use Memoize;
 
 our @EXPORT = qw(
     getLsvpdInfos
+    getLsconfInfos
     getAdaptersFromLsdev
 );
-
-memoize('getLsvpdInfos');
-memoize('getAdaptersFromLsdev');
 
 sub getLsvpdInfos {
     my (%params) = (
@@ -23,18 +20,20 @@ sub getLsvpdInfos {
         @_
     );
 
-    my $handle = getFileHandle(%params);
-    return unless $handle;
+    my @lines = getAllLines(%params)
+        or return;
 
     my @devices;
     my $device;
 
     # skip first lines
-    while (my $line = <$handle>) {
+    while (1) {
+        my $line = shift @lines;
+        last unless defined($line);
         last if $line =~ /^\*FC \?+/;
     }
 
-    while (my $line = <$handle>) {
+    foreach my $line (@lines) {
         if ($line =~ /^\*FC \?+/) {
             # block delimiter
             push @devices, $device;
@@ -42,16 +41,41 @@ sub getLsvpdInfos {
             next;
         }
 
-        chomp $line;
         next unless $line =~ /^\* ([A-Z]{2}) \s+ (.*\S)/x;
         $device->{$1} = $2;
     }
-    close $handle;
 
     # last device
     push @devices, $device;
 
     return @devices;
+}
+
+sub getLsconfInfos {
+    my (%params) = (
+        command => 'lsconf',
+        @_
+    );
+
+    my @lines = getAllLines(%params)
+        or return;
+
+    my ($key, $infos);
+
+    foreach my $line (@lines) {
+        $line =~ s/\r$//;
+        if ($line =~ /^(\S[^:]+) : \s+ (.+) \s*$/x) {
+            $infos->{$1} = $2;
+        } elsif ($line =~ /^\s*$/) {
+            undef $key;
+        } elsif ($key && $line =~ /^\s+ (\S[^:]+) : \s+ (.+) \s*$/x) {
+            $infos->{$key}->{$1} = $2;
+        } elsif (!$key && $line =~ /^\S/) {
+            $key = $line;
+        }
+    }
+
+    return $infos;
 }
 
 sub getAdaptersFromLsdev {
@@ -60,13 +84,12 @@ sub getAdaptersFromLsdev {
         @_
     );
 
-    my $handle = getFileHandle(%params);
-    return unless $handle;
+    my @lines = getAllLines(%params)
+        or return;
 
     my @adapters;
 
-    while (my $line = <$handle>) {
-        chomp $line;
+    foreach my $line (@lines) {
         my @info = split(/:/, $line);
         push @adapters, {
             NAME        => $info[0],
@@ -74,7 +97,6 @@ sub getAdaptersFromLsdev {
             DESCRIPTION => $info[2]
         };
     }
-    close $handle;
 
     return @adapters;
 }

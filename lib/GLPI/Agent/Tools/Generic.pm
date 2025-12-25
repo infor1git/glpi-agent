@@ -5,7 +5,6 @@ use warnings;
 use parent 'Exporter';
 
 use English qw(-no_match_vars);
-use Memoize;
 use File::stat;
 use File::Basename qw(basename);
 
@@ -30,25 +29,17 @@ my $USBVendors;
 my $USBClasses;
 my $EDIDVendors;
 
-# this trigger some errors under Win32:
-# Anonymous function called in forbidden scalar context
-if ($OSNAME ne 'MSWin32') {
-    memoize('getDmidecodeInfos');
-    memoize('getPCIDevices');
-}
-
 sub getDmidecodeInfos {
     my (%params) = (
         command => 'dmidecode',
         @_
     );
 
-    my $handle = getFileHandle(%params);
-    return unless $handle;
+    my @lines = getAllLines(%params)
+        or return;
     my ($info, $block, $type);
 
-    while (my $line = <$handle>) {
-        chomp $line;
+    foreach my $line (@lines) {
 
         if ($line =~ /DMI type (\d+)/) {
             # start of block
@@ -73,7 +64,6 @@ sub getDmidecodeInfos {
 
         $block->{$1} = trimWhitespace($2);
     }
-    close $handle;
 
     # push last block in list if still defined
     if ($block) {
@@ -98,6 +88,7 @@ sub isInvalidBiosValue {
             Not \s* Specified                  |
             Not \s* Present                    |
             Not \s* Available                  |
+            Not \s* Installed                  |
             Default \s* string                 |
             System \s* Product \s* Name        |
             System \s* manufacturer            |
@@ -144,7 +135,10 @@ sub getCpusFromDmidecode {
         };
 
         if ($info->{'Thread Count'} && $corecount) {
-            $cpu->{THREAD} = int($info->{'Thread Count'} / $corecount);
+            $cpu->{THREAD} = $info->{'Thread Count'} / $corecount;
+
+            # Support case thread is not an integer. This can happen is cpu provides performance and efficiency cores.
+            $cpu->{THREAD} = int($cpu->{THREAD})+1 if $cpu->{THREAD} && $cpu->{THREAD} > int($cpu->{THREAD});
         }
 
         $cpu->{NAME} =
@@ -227,12 +221,12 @@ sub getHdparmInfo {
         $params{dump}->{"hdparm-".basename($params{device})} = getAllLines(%params);
     }
 
-    my $handle = getFileHandle(%params)
+    my @lines = getAllLines(%params)
         or return;
 
     my $info;
 
-    while (my $line = <$handle>) {
+    foreach my $line (@lines) {
         if ($line =~ /Integrity word not set/) {
             $info = {};
             last;
@@ -240,13 +234,12 @@ sub getHdparmInfo {
 
         $info->{DESCRIPTION}  = $1 if $line =~ /Transport:.+(SATA|SAS|SCSI|USB)/;
         $info->{DISKSIZE}     = $1 if $line =~ /1000:\s+(\d*)\sMBytes/;
-        $info->{FIRMWARE}     = $1 if $line =~ /Firmware Revision:\s+(\w+)/;
+        $info->{FIRMWARE}     = $1 if $line =~ /Firmware Revision:\s+([\w.]+)/;
         $info->{INTERFACE}    = $1 if $line =~ /Transport:.+(SATA|SAS|SCSI|USB)/;
         $info->{MODEL}        = $1 if $line =~ /Model Number:\s+(\w.+\w)/;
         $info->{SERIALNUMBER} = $1 if $line =~ /Serial Number:\s+([\w-]*)/;
         $info->{WWN}          = $1 if $line =~ /WWN Device Identifier:\s+(\w+)/;
     }
-    close $handle;
 
     return $info;
 }
@@ -256,12 +249,12 @@ sub getPCIDevices {
         command => 'lspci -v -nn',
         @_
     );
-    my $handle = getFileHandle(%params);
+    my @lines = getAllLines(%params)
+        or return;
 
-    my (@controllers, $controller);
+    my (@controllers, $controller, $mem);
 
-    while (my $line = <$handle>) {
-        chomp $line;
+    foreach my $line (@lines) {
 
         if ($line =~ /^
             (\S+) \s                     # slot
@@ -286,16 +279,18 @@ sub getPCIDevices {
         next unless defined $controller;
 
         if ($line =~ /^$/) {
+            $controller->{MEMORY} = $mem if $mem;
             push(@controllers, $controller);
             undef $controller;
+            undef $mem;
         } elsif ($line =~ /^\tKernel driver in use: (\w+)/) {
             $controller->{DRIVER} = $1;
         } elsif ($line =~ /^\tSubsystem: ?.* \[?([a-f\d]{4}:[a-f\d]{4})\]?/) {
             $controller->{PCISUBSYSTEMID} = $1;
+        } elsif ($line =~ /^\s+Memory.*\sprefetchable.*\[size=(.*)\]/) {
+            $mem += getCanonicalSize($1."B", 1024) // 0;
         }
     }
-
-    close $handle;
 
     return @controllers;
 }
@@ -353,18 +348,33 @@ my @datadirs = ($OSNAME ne 'linux') ? () : (
 sub _getIdsFile {
     my (%params) = @_;
 
+    my $idsfile = $params{idsfile}
+        or return;
+
     # Initialize datadir to share if run from tests
     my $datadir = $params{datadir} || "share";
 
-    return "$datadir/$params{idsfile}"
+    return "$datadir/$idsfile"
         unless @datadirs;
 
     # Try to use the most recent ids file from well-known places
     my %files = map { $_ => stat($_)->ctime() } grep { -s $_ }
-        map { "$_/$params{idsfile}" } @datadirs, $datadir ;
+        map { "$_/$idsfile" } @datadirs, $datadir ;
 
     # Sort by creation time
     my @sorted_files = sort { $files{$a} <=> $files{$b} } keys(%files);
+
+    unless (@sorted_files) {
+        if ($params{logger}) {
+            $params{logger}->warning("$idsfile not found");
+            my $message = $idsfile =~ /^(pci|usb)\.ids$/ ? "You may need to install $idsfile package" : "";
+            my $shareurl = "https://github.com/glpi-project/glpi-agent/tree/develop/share";
+            $message .= ($message ? "or y" : "Y")."ou can download $idsfile file from $shareurl and install it into $datadir folder"
+                if $datadir && -d $datadir;
+            $params{logger}->info($message) if $message;
+        }
+        return;
+    }
 
     return pop @sorted_files;
 }
@@ -372,7 +382,8 @@ sub _getIdsFile {
 sub _loadPCIDatabase {
     my (%params) = @_;
 
-    my $file = _getIdsFile( %params, idsfile => "pci.ids" );
+    my $file = _getIdsFile( %params, idsfile => "pci.ids" )
+        or return;
 
     ($PCIVendors, $PCIClasses) = _loadDatabase( file => $file );
 }
@@ -380,19 +391,19 @@ sub _loadPCIDatabase {
 sub _loadUSBDatabase {
     my (%params) = @_;
 
-    my $file = _getIdsFile( %params, idsfile => "usb.ids" );
+    my $file = _getIdsFile( %params, idsfile => "usb.ids" )
+        or return;
 
     ($USBVendors, $USBClasses) = _loadDatabase( file => $file );
 }
 
 sub _loadDatabase {
-    my $handle = getFileHandle(@_, local => 1);
-    return unless $handle;
+    my @lines = getAllLines(@_, local => 1)
+        or return;
 
     my ($vendors, $classes);
     my ($vendor_id, $device_id, $class_id);
-    while (my $line = <$handle>) {
-
+    foreach my $line (@lines) {
         if ($line =~ /^\t (\S{4}) \s+ (.*)/x) {
             # Device ID
             $device_id = $1;
@@ -415,7 +426,6 @@ sub _loadDatabase {
             $classes->{$class_id}->{subclasses}->{$subclass_id}->{name} = $2;
         }
     }
-    close $handle;
 
     return ($vendors, $classes);
 }
@@ -424,16 +434,16 @@ sub _loadDatabase {
 sub _loadEDIDDatabase {
     my (%params) = @_;
 
-    my $file = _getIdsFile( %params, idsfile => "edid.ids" );
+    my $file = _getIdsFile( %params, idsfile => "edid.ids" )
+        or return;
 
-    my $handle = getFileHandle( file => $file, local => 1 );
-    return unless $handle;
+    my @lines = getAllLines(file => $file, local => 1)
+        or return;
 
-    foreach my $line (<$handle>) {
+    foreach my $line (@lines) {
        next unless $line =~ /^([A-Z]{3}) __ (.*)$/;
        $EDIDVendors->{$1} = $2;
-   }
-    close $handle;
+    }
 
    return;
 }

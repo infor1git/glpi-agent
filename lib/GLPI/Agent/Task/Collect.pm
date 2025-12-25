@@ -150,18 +150,11 @@ sub _validateAnswer {
 }
 
 sub run {
-    my ($self, %params) = @_;
+    my ($self) = @_;
 
     $self->{client} = GLPI::Agent::HTTP::Client::Fusion->new(
-        logger       => $self->{logger},
-        user         => $params{user},
-        password     => $params{password},
-        proxy        => $params{proxy},
-        ca_cert_file => $params{ca_cert_file},
-        ca_cert_dir  => $params{ca_cert_dir},
-        no_ssl_check => $params{no_ssl_check},
-        ssl_cert_file => $params{ssl_cert_file},
-        debug        => $self->{debug}
+        logger  => $self->{logger},
+        config  => $self->{config},
     );
 
     my $globalRemoteConfig = $self->{client}->send(
@@ -173,12 +166,17 @@ sub run {
         }
     );
 
+    my $id = $self->{target}->id();
+    if (!$globalRemoteConfig) {
+        $self->{logger}->info("Collect task not supported by $id");
+        return;
+    }
     if (!$globalRemoteConfig->{schedule}) {
-        $self->{logger}->info("No job schedule returned from server at ".$self->{target}->{url});
+        $self->{logger}->info("No job schedule returned by $id");
         return;
     }
     if (ref( $globalRemoteConfig->{schedule} ) ne 'ARRAY') {
-        $self->{logger}->info("Malformed schedule from server at ".$self->{target}->{url});
+        $self->{logger}->info("Malformed schedule from by $id");
         return;
     }
     if ( !@{$globalRemoteConfig->{schedule}} ) {
@@ -252,7 +250,10 @@ sub _processRemote {
             next;
         }
 
-        my @results = &{ $functions{ $job->{function} } }(%$job);
+        my @results = &{ $functions{ $job->{function} } }(
+            logger  => $self->{logger},
+            %{$job}
+        );
 
         my $count = int(@results);
 
@@ -306,17 +307,23 @@ sub _encodeRegistryValueForCollect {
     # Dump REG_BINARY/REG_RESOURCE_LIST/REG_FULL_RESOURCE_DESCRIPTOR as hex strings
     if (defined($type) && ($type == 3 || $type >= 8)) {
         $value = join(" ", map { sprintf "%02x", ord } split(//, $value));
-    } else {
-        $value = GLPI::Agent::Tools::Win32::encodeFromRegistry($value);
     }
 
     return $value;
 }
 
+my @RegistryType = qw/REG_NONE  REG_SZ  REG_EXPAND_SZ   REG_BINARY  REG_DWORD
+    REG_DWORD_BIG_ENDIAN    REG_LINK    REG_MULTI_SZ    REG_RESOURCE_LIST
+    REG_FULL_RESOURCE_DESCRIPTOR    REG_RESOURCE_REQUIREMENTS_LIST  REG_QWORD
+/;
+
 sub _getFromRegistry {
     my %params = @_;
 
     return unless GLPI::Agent::Tools::Win32->require();
+
+    $params{logger}->debug("Looking for '$params{path}' registry key...")
+        if $params{logger};
 
     # Here we need to retrieve values with their type, getRegistryValue API
     # has been modify to support withtype flag as param
@@ -332,13 +339,17 @@ sub _getFromRegistry {
         foreach my $k (keys %$values) {
             # Skip sub keys
             next if ($k =~ m|/$|);
-            my ($value,$type) = @{$values->{$k}};
-            $result->{$k} = _encodeRegistryValueForCollect($value,$type) ;
+            my ($value, $type) = @{$values->{$k}};
+            $result->{$k} = _encodeRegistryValueForCollect($value, $type);
+            $params{logger}->debug2("Found $RegistryType[$type] value: ".$result->{$k})
+                if $params{logger};
         }
     } else {
         my ($k) = $params{path} =~ m|([^/]+)$| ;
         my ($value,$type) = @{$values};
         $result->{$k} = _encodeRegistryValueForCollect($value,$type);
+        $params{logger}->debug2("Found $RegistryType[$type] value: ".$result->{$k})
+            if $params{logger};
     }
 
     return ($result);
@@ -346,11 +357,15 @@ sub _getFromRegistry {
 
 sub _findFile {
     my %params = (
-        dir => '/',
-        limit => 50
-        , @_);
+        dir     => '/',
+        limit   => 50,
+        @_
+    );
 
     return unless -d $params{dir};
+
+    $params{logger}->debug("Looking for file under '$params{dir}' folder")
+        if $params{logger};
 
     my @results;
 
@@ -360,7 +375,6 @@ sub _findFile {
                 if (!$params{recursive} && $File::Find::name ne $params{dir}) {
                     $File::Find::prune = 1  # Don't recurse.
                 }
-
 
                 if (   $params{filter}{is_dir}
                     && !$params{filter}{checkSumSHA512}
@@ -415,6 +429,9 @@ sub _findFile {
                     return
                         if $sha->hexdigest ne $params{filter}{checkSumSHA2};
                 }
+
+                $params{logger}->debug2("Found file: ".$File::Find::name)
+                    if $params{logger};
 
                 push @results, {
                     size => $size,

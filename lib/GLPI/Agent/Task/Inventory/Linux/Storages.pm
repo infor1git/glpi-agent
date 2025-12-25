@@ -7,7 +7,6 @@ use parent 'GLPI::Agent::Task::Inventory::Module';
 
 use English qw(-no_match_vars);
 use File::Basename qw(basename);
-use Memoize;
 
 use GLPI::Agent::Tools;
 use GLPI::Agent::Tools::Generic;
@@ -15,8 +14,6 @@ use GLPI::Agent::Tools::Linux;
 use GLPI::Agent::Tools::Unix;
 
 use constant    category    => "storage";
-
-memoize('_correctHdparmAvailable');
 
 sub isEnabled {
     return 1;
@@ -98,9 +95,9 @@ sub _getDevices {
         );
 
         if (!$device->{MANUFACTURER} || $device->{MANUFACTURER} eq 'ATA') {
-            $device->{MANUFACTURER} = getCanonicalManufacturer(
-                $device->{MODEL}
-            );
+            my $manufacturer = getCanonicalManufacturer($device->{MODEL});
+            $device->{MANUFACTURER} = $manufacturer
+                unless empty($manufacturer) || $manufacturer eq $device->{MODEL};
         } elsif ($device->{MANUFACTURER} && $device->{MANUFACTURER} =~ /^0x(\w+)$/) {
             my $vendor = getPCIDeviceVendor(id => lc($1));
             $device->{MANUFACTURER} = $vendor->{name}
@@ -112,6 +109,10 @@ sub _getDevices {
                 device => '/dev/' . $device->{NAME},
                 %params
             );
+        }
+
+        if ($device->{NAME} =~ /^nvme/) {
+            $device->{INTERFACE} = "NVME";
         }
 
         # In some case, serial can't be defined using hdparm (command missing or virtual disk)

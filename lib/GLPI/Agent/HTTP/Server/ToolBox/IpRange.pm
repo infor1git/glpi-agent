@@ -51,10 +51,11 @@ sub yaml_config_specs {
             text        => "Show IP Ranges in navigation bar",
             navbar      => "IP Ranges",
             link        => $self->index(),
+            icon        => "network",
             index       => 40, # index in navbar
         },
         iprange_yaml  => {
-            category    => "IP Ranges",
+            category    => "Toolbox plugin configuration",
             type        => $self->isyes($yaml_config->{'updating_support'}) ? "option" : "readonly",
             value       => $yaml_config->{'iprange_yaml'} || (
                 $self->isyes($yaml_config->{'updating_support'}) ? "" : "[default]"),
@@ -137,7 +138,7 @@ sub update_template_hash {
     $hash->{page} = $hash->{display} ? int(($hash->{start}-1)/$hash->{display})+1 : 1;
     $hash->{pages} = $hash->{display} ? int(($hash->{list_count}-1)/$hash->{display})+1 : 1;
     $hash->{start} = $hash->{display} ? $hash->{start} - $hash->{start}%$hash->{display} : 0;
-    # Handle case we are indecing the last element
+    # Handle case we are indexing the last element
     $hash->{start} -= $hash->{display} if $hash->{start} == $hash->{list_count};
     $hash->{start} = 0 if $hash->{start} < 0;
 }
@@ -168,8 +169,6 @@ sub _submit_add {
     my ($self, $form, $ip_range) = @_;
 
     return unless $form && $ip_range;
-
-    $form->{allow_name_edition} = $form->{empty};
 
     # Validate input/name before updating
     my $name = trimWhitespace($form->{'input/name'} || $form->{'edit'} || "");
@@ -202,8 +201,8 @@ sub _submit_add {
                 delete $ip_range->{$name}->{$key};
             }
         }
-        my @credentials = sort { $a cmp $b } map { m{^checkbox/(.*)$} }
-            grep { /^checkbox\// && $form->{$_} eq 'on' } keys(%{$form});
+        my @credentials = sort { $a cmp $b } map { m{^checkbox/cred/(.*)$} }
+            grep { m{^checkbox/cred/} && $form->{$_} eq 'on' } keys(%{$form});
         if (@credentials) {
             $ip_range->{$name}->{credentials} = \@credentials;
         } else {
@@ -211,22 +210,11 @@ sub _submit_add {
         }
         $self->need_save(ip_range);
         delete $form->{empty};
-        delete $form->{allow_name_edition};
     } else {
         $self->errors("New IP range: Can't create entry without name") if $form->{empty};
-        # We should return an empty add form with name edition allowed
+        # We still should return an empty add form
         $form->{empty} = 1;
-        $form->{allow_name_edition} = 1;
     }
-}
-
-sub _submit_rename {
-    my ($self, $form) = @_;
-
-    return unless $form;
-
-    # Just enable the name field
-    $form->{allow_name_edition} = 1;
 }
 
 sub _submit_update {
@@ -234,20 +222,8 @@ sub _submit_update {
 
     return unless $form && $ip_range;
 
-    my $update = $form->{'edit'};
-    if ($update && exists($ip_range->{$update})) {
-        # Validate input/name before updating
-        my $name = $form->{'input/name'} || $update;
-        my $id   = $form->{'input/id'};
-        my $entry = $name . ( $id ? "-$id" : "" );
-        if ($entry && $entry ne $update && exists($ip_range->{$entry})) {
-            $name = encode('UTF-8', $name);
-            return $self->errors("IP range update: An entry still exists with that name: '$name'");
-        }
-        # Rename the entry if necessary
-        $ip_range->{$entry} = delete $ip_range->{$update}
-            if ($entry ne $update);
-        $self->edit($entry);
+    my $edit = $form->{'edit'};
+    if ($edit && exists($ip_range->{$edit})) {
         # Validate form
         if (!$form->{"input/ip_start"}) {
             return $self->errors("IP range update: Start ip is mandatory");
@@ -258,6 +234,41 @@ sub _submit_update {
         } elsif (!Net::IP->new($form->{"input/ip_end"})) {
             return $self->errors("IP range update: Wrong end ip format");
         }
+
+        my $newname = $form->{'input/name'};
+        if (defined($newname) && length($newname) && $newname ne $edit) {
+            if (exists($ip_range->{$newname})) {
+                $newname = encode('UTF-8', $newname);
+                return $self->errors("Rename IP range: An entry still exists with that name: '$newname'");
+            }
+
+            $ip_range->{$newname} = delete $ip_range->{$edit};
+            $self->need_save(ip_range);
+
+            # We also need to update any usage in tasks
+            my $jobs = $self->yaml('jobs') || {};
+            my $count = 0;
+            foreach my $job (values(%{$jobs})) {
+                next unless $job->{type} eq 'netscan';
+                my $config = $job->{config}
+                    or next;
+                next unless ref($config) eq 'HASH';
+                next unless ref($config->{ip_range}) eq 'ARRAY' && first { $_ eq $edit } @{$config->{ip_range}};
+                my @ipranges = grep { $_ ne $edit } @{$config->{ip_range}};
+                push @ipranges, $newname;
+                $config->{ip_range} = [ sort @ipranges ];
+                $count++;
+            }
+            if ($count) {
+                $self->need_save('jobs');
+                $self->debug2("Fixed $count jobs ip_range refs");
+            }
+
+            # Reset edited entry
+            $edit = $newname;
+            $self->edit($edit);
+        }
+
         # Validate IP Range as expected in NetDiscovery task
         my $block = Net::IP->new( $form->{"input/ip_start"}."-".$form->{"input/ip_end"} );
         return $self->errors("IP range update: Unsupported IP range: ".Net::IP->Error())
@@ -266,19 +277,21 @@ sub _submit_update {
         foreach my $key (qw(ip_start ip_end description)) {
             my $input = "input/$key";
             if (defined($form->{$input}) && length($form->{$input})) {
-                $ip_range->{$entry}->{$key} = $form->{$input};
+                $ip_range->{$edit}->{$key} = $form->{$input};
             } else {
-                delete $ip_range->{$entry}->{$key};
+                delete $ip_range->{$edit}->{$key};
             }
         }
-        my @credentials = sort { $a cmp $b } map { m{^checkbox/(.*)$} }
-            grep { /^checkbox\// && $form->{$_} eq 'on' } keys(%{$form});
+        my @credentials = sort { $a cmp $b } map { m{^checkbox/cred/(.*)$} }
+            grep { m{^checkbox/cred/} && $form->{$_} eq 'on' } keys(%{$form});
         if (@credentials) {
-            $ip_range->{$entry}->{credentials} = \@credentials;
+            $ip_range->{$edit}->{credentials} = \@credentials;
         } else {
-            delete $ip_range->{$entry}->{credentials};
+            delete $ip_range->{$edit}->{credentials};
         }
         $self->need_save(ip_range);
+    } else {
+        $self->errors("IP range update: No such IP range: '$edit'");
         $self->reset_edit();
     }
 }
@@ -294,6 +307,29 @@ sub _submit_delete {
     return $self->errors("Deleting IP range: No IP range selected")
         unless @delete;
 
+    # We also need to check if any range is used in tasks
+    my %used = ();
+    my %delete = map { $_ => 1 } @delete;
+    my $keys = keys(%delete);
+    my $jobs = $self->yaml('jobs') || {};
+    foreach my $job (values(%{$jobs})) {
+        next unless $job->{type} eq 'netscan';
+        my $config = $job->{config}
+            or next;
+        next unless ref($config) eq 'HASH';
+        next unless ref($config->{ip_range}) eq 'ARRAY';
+        foreach my $iprange (@{$config->{ip_range}}) {
+            next if exists($used{$iprange});
+            next unless exists($delete{$iprange});
+            $used{$iprange} = encode('UTF-8', $iprange);
+            delete $delete{$iprange};
+            last unless --$keys;
+        }
+        last unless $keys;
+    }
+    return $self->errors("Deleting IP range: Can't delete used IP range: ".join(",", sort values(%used)))
+        if keys(%used);
+
     foreach my $name (@delete) {
         delete $ip_range->{$name};
         $self->need_save(ip_range);
@@ -308,8 +344,6 @@ sub _submit_addcredential {
 
     return unless $form && $ip_range && $credentials;
 
-    $form->{allow_name_edition} = $form->{empty};
-
     my $credential = $form->{'input/credentials'};
     return $self->errors("IP range credential adding: No credential selected")
         if (defined($credential) && !length($credential));
@@ -321,7 +355,7 @@ sub _submit_addcredential {
     if (defined($form->{'edit'})) {
         my $name = $form->{'edit'};
         $form->{empty} = 1 unless $name;
-        $form->{"checkbox/$credential"} = "on";
+        $form->{"checkbox/cred/$credential"} = "on";
     } else {
         my @selected = map { m{^checkbox/(.*)$} }
             grep { m{^checkbox/} && $form->{$_} eq 'on' } keys(%{$form});
@@ -349,7 +383,7 @@ sub _submit_rmcredential {
     return $self->errors("IP range credential removing: Invalid credential")
         unless (defined($credential) && length($credential));
     my @selected = map { m{^checkbox/(.*)$} }
-        grep { /^checkbox\// && $form->{$_} eq 'on' } keys(%{$form});
+        grep { m{^checkbox/} && $form->{$_} eq 'on' } keys(%{$form});
 
     return $self->errors("IP range credential removing: No IP range selected")
         unless @selected;
@@ -371,19 +405,19 @@ sub _submit_rmcredential {
     }
 }
 
-sub _submit_cancel {
-    my ($self) = @_;
+sub _submit_back_to_list {
+    my ($self, $form) = @_;
     $self->reset_edit();
+    delete $form->{empty};
 }
 
 my %handlers = (
     'submit/add'            => \&_submit_add,
-    'submit/rename'         => \&_submit_rename,
     'submit/update'         => \&_submit_update,
     'submit/delete'         => \&_submit_delete,
     'submit/addcredential'  => \&_submit_addcredential,
     'submit/rmcredential'   => \&_submit_rmcredential,
-    'submit/cancel'         => \&_submit_cancel,
+    'submit/back-to-list'   => \&_submit_back_to_list,
 );
 
 sub handle_form {

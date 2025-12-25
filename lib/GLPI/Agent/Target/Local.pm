@@ -5,6 +5,9 @@ use warnings;
 
 use parent 'GLPI::Agent::Target';
 
+use File::Spec;
+use Cwd qw(abs_path);
+
 my $count = 0;
 
 sub new {
@@ -15,6 +18,8 @@ sub new {
     my $self = $class->SUPER::new(%params);
 
     $self->{path} = $params{path};
+    $self->{fullpath} = abs_path(File::Spec->rel2abs($params{path}))
+        unless $self->{path} eq '-';
 
     $self->{format} = $params{json} ? 'json' : $params{html} ? 'html' : 'xml';
 
@@ -34,6 +39,28 @@ sub getPath {
     my ($self) = @_;
 
     return $self->{path};
+}
+
+sub getFullPath {
+    my ($self, $subfolder) = @_;
+
+    my $fullpath = $self->{fullpath} || $self->{path};
+
+    return $subfolder ? "$fullpath/$subfolder" : $fullpath;
+}
+
+sub setPath {
+    my ($self, $path) = @_;
+
+    $self->{path} = $path
+        if $path && -d $path;
+}
+
+sub setFullPath {
+    my ($self, $path) = @_;
+
+    $self->{fullpath} = $path
+        if $path && -d $path;
 }
 
 sub getName {
@@ -94,6 +121,10 @@ Reset the local target counter.
 =head2 getPath()
 
 Return the local output directory for this target.
+
+=head2 setPath($path)
+
+Set the local output directory for this target.
 
 =head2 getName()
 

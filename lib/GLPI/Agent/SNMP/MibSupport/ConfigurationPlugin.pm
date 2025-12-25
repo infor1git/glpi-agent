@@ -89,7 +89,7 @@ sub configure {
 
     $logger = $params{logger} || GLPI::Agent::Logger->new();
 
-    $config = GLPI::Agent::Config->new();
+    $config = $params{config} || GLPI::Agent::Config->new();
 
     my $confdir = $config->confdir();
 
@@ -105,7 +105,7 @@ sub configure {
 
     my $yamlconfig = $confdir . "/" . $config->{yaml};
     if (! -e $yamlconfig) {
-        $logger->debug("$yamlconfig configuration not found");
+        $logger->debug2("$yamlconfig configuration not found");
         return;
     }
 

@@ -11,6 +11,8 @@ use UNIVERSAL::require;
 
 use GLPI::Agent::Tools;
 use GLPI::Agent::Inventory;
+use GLPI::Agent::XML;
+use GLPI::Agent::Event;
 
 use GLPI::Agent::Task::Inventory::Version;
 
@@ -59,18 +61,10 @@ sub isEnabled {
                                         $self->{logger}->error("Can't load GLPI client API to handle get_params")
                                             unless $cant_load_glpi_client++;
                                     } else {
-                                        my $config = $self->{config};
                                         $this_param->{_glpi_client} = GLPI::Agent::HTTP::Client::GLPI->new(
-                                            logger       => $self->{logger},
-                                            user         => $config->{user},
-                                            password     => $config->{password},
-                                            proxy        => $config->{proxy},
-                                            ca_cert_file => $config->{'ca-cert-file'},
-                                            ca_cert_dir  => $config->{'ca-cert-dir'},
-                                            no_ssl_check => $config->{'no-ssl-check'},
-                                            no_compress  => $config->{'no-compression'},
-                                            ssl_cert_file => $config->{'ssl-cert-file'},
-                                            agentid      => $self->{agentid},
+                                            logger  => $self->{logger},
+                                            config  => $self->{config},
+                                            agentid => $self->{agentid},
                                         );
                                         $this_param->{_glpi_url} = $self->{target}->getUrl();
                                         push @validated, $this_param;
@@ -84,7 +78,7 @@ sub isEnabled {
                     if (@validated) {
                         push @params, @validated;
                     } else {
-                        my $debug = join(",", map { "$_=".($param->{$_}//"") } keys(%{$param}));
+                        my $debug = join("&", map { "$_=".($param->{$_}//"") } keys(%{$param}));
                         $self->{logger}->debug("Skipping invalid params: $debug")
                     }
                 }
@@ -111,7 +105,7 @@ sub isEnabled {
 }
 
 sub run {
-    my ($self, %params) = @_;
+    my ($self) = @_;
 
     if ( $REAL_USER_ID != 0 ) {
         $self->{logger}->warning(
@@ -119,6 +113,7 @@ sub run {
         );
     }
 
+    $self->{aborted} = 0;
     $self->{modules} = {};
 
     my $tag = $self->{config}->{'tag'};
@@ -126,6 +121,7 @@ sub run {
     my $inventory = GLPI::Agent::Inventory->new(
         statedir => $self->{target}->getStorage()->getDirectory(),
         deviceid => $self->{deviceid},
+        datadir  => $self->{datadir},
         logger   => $self->{logger},
         tag      => $tag
     );
@@ -156,11 +152,6 @@ sub run {
         map { $_ => 1 } @{$self->{config}->{'no-category'}}
     };
 
-    # Always disable unsupported categories in deprecated XML format
-    map { $self->{disabled}->{$_} = 1 } qw(database)
-        if ($self->{target}->isType('local') && $self->{target}->{format} eq 'xml')
-            || ($self->{target}->isType('server') && !$self->{target}->isGlpiServer());
-
     # Support inventory event
     if ($event && !$self->setupEvent()) {
         $self->{logger}->info("Skipping Inventory task event on ".$self->{target}->id());
@@ -177,11 +168,18 @@ sub run {
     }
     $inventory->setFormat($format);
 
+    # Always disable unsupported categories in deprecated XML format
+    map { $self->{disabled}->{$_} = 1 } qw(database)
+        if ($self->{target}->isType('local') && $format eq 'xml')
+            || ($self->{target}->isType('server') && !$self->{target}->isGlpiServer());
+
     $self->_initModulesList();
-    $self->_feedInventory();
+    $self->_feedInventory() unless $self->{aborted};
 
     # Tell perl modules hash can now be cleaned from memory
     delete $self->{modules};
+
+    return if $self->{aborted};
 
     return $self->submit();
 }
@@ -195,16 +193,19 @@ sub setupEvent {
         return;
     }
 
-    unless ($event->{partial}) {
+    unless ($event->partial) {
         $self->{logger}->debug("Only support partial inventory events for Inventory task");
         return;
     }
 
+    # Set inventory as partial one
+    $self->{inventory}->isPartial(1);
+
     # Support event with category defined
-    if ($event->{category}) {
-        my %keep = map { lc($_) => 1 } grep { ! $self->{disabled}->{$_} } split(/,+/, $event->{category});
+    if ($event->category) {
+        my %keep = map { lc($_) => 1 } grep { ! $self->{disabled}->{$_} } split(/,+/, $event->category);
         unless (keys(%keep)) {
-            $self->{logger}->debug("Nothing to inventory on partial inventory event");
+            $self->{logger}->info("Nothing to inventory on partial inventory event");
             return;
         }
         my @categories = $self->getCategories();
@@ -213,11 +214,11 @@ sub setupEvent {
             if (any { $_ eq $category } @categories) {
                 $valid = 1;
             } else {
-                $self->{logger}->debug("Unknown category on partial inventory event: $category");
+                $self->{logger}->error("Unknown category on partial inventory event: $category");
             }
         }
         unless ($valid) {
-            $self->{logger}->debug("Invalid partial inventory event with no supported category");
+            $self->{logger}->error("Invalid partial inventory event with no supported category");
             return;
         }
         my $cached = $self->cachedata();
@@ -235,7 +236,7 @@ sub setupEvent {
             $self->{disabled}->{$category} = 1 unless $keep{$category};
         }
     } else {
-        $self->{logger}->debug("No category property on partial inventory event");
+        $self->{logger}->error("No category property on partial inventory event");
         return;
     }
 
@@ -246,61 +247,24 @@ sub setupEvent {
 sub submit {
     my ($self) = @_;
 
-    my $config    = $self->{config};
     my $inventory = $self->{inventory};
 
     # Keep cached data for next partial inventory
     if ($self->{partial} && $self->keepcache() && !$self->cachedata()) {
-        my $content = $inventory->getContent();
-        my $keep = {
-            map { $_ => $content->{$_} } grep { $content->{$_} } qw(BIOS HARDWARE)
-        };
+        my $keep = {};
+        foreach my $section (qw(BIOS HARDWARE)) {
+            my $content = $inventory->getSection($section)
+                or next;
+            $keep->{$section} = $content;
+        }
         $self->cachedata($keep);
     }
 
     if ($self->{target}->isType('local')) {
-        my $path   = $self->{target}->getPath();
-        my $format = $inventory->getFormat();
-        my ($file, $handle);
 
-        SWITCH: {
-            if ($path eq '-') {
-                $handle = \*STDOUT;
-                last SWITCH;
-            }
-
-            if (-d $path) {
-                $file =
-                    $path . "/" . $inventory->getDeviceId() .
-                    ($format eq 'xml' ? '.xml' : '.html');
-                $file = $path . "/" . $self->{agentid} . ".json"
-                    if $format eq 'json';
-                last SWITCH;
-            }
-
-            $file = $path;
-        }
-
-        if ($file) {
-            if (Win32::Unicode::File->require()) {
-                $handle = Win32::Unicode::File->new('w', $file);
-            } else {
-                open($handle, '>', $file)
-                    or die "Can't write to $file: $ERRNO\n";
-            }
-            $self->{logger}->error("Can't write to $file: $ERRNO")
-                unless $handle;
-        }
-
-        binmode $handle, ':encoding(UTF-8)'
-            unless $format eq "json";
-
-        $self->_printInventory($handle);
-
-        if ($file) {
-            $self->{logger}->info("Inventory saved in $file");
-            close $handle;
-        }
+        my $file = $inventory->save($self->{target}->getFullPath());
+        $self->{logger}->info("Inventory ".($file eq '-' ? "dumped on standard output" : "saved in $file"))
+            if $file;
 
     } elsif ($self->{target}->isGlpiServer()) {
 
@@ -308,21 +272,16 @@ sub submit {
             unless GLPI::Agent::HTTP::Client::GLPI->require();
 
         my $client = GLPI::Agent::HTTP::Client::GLPI->new(
-            logger          => $self->{logger},
-            user            => $config->{user},
-            password        => $config->{password},
-            proxy           => $config->{proxy},
-            ca_cert_file    => $config->{'ca-cert-file'},
-            ca_cert_dir     => $config->{'ca-cert-dir'},
-            no_ssl_check    => $config->{'no-ssl-check'},
-            no_compress     => $config->{'no-compression'},
-            ssl_cert_file   => $config->{'ssl-cert-file'},
-            agentid         => $self->{agentid},
+            logger  => $self->{logger},
+            config  => $self->{config},
+            agentid => $self->{agentid},
         );
 
         my $response = $client->send(
             url     => $self->{target}->getUrl(),
-            message => $inventory->getContent()
+            message => $inventory->getContent(
+                server_version => $self->{target}->getTaskVersion('inventory')
+            )
         );
         return unless $response;
 
@@ -334,16 +293,9 @@ sub submit {
             unless GLPI::Agent::HTTP::Client::OCS->require();
 
         my $client = GLPI::Agent::HTTP::Client::OCS->new(
-            logger          => $self->{logger},
-            user            => $config->{user},
-            password        => $config->{password},
-            proxy           => $config->{proxy},
-            ca_cert_file    => $config->{'ca-cert-file'},
-            ca_cert_dir     => $config->{'ca-cert-dir'},
-            no_ssl_check    => $config->{'no-ssl-check'},
-            no_compress     => $config->{'no-compression'},
-            ssl_cert_file   => $config->{'ssl-cert-file'},
-            agentid         => $self->{agentid},
+            logger  => $self->{logger},
+            config  => $self->{config},
+            agentid => $self->{agentid},
         );
 
         return $self->{logger}->error("Can't load Inventory XML Query API")
@@ -419,8 +371,13 @@ sub _initModulesList {
     my @modules = $self->getModules('Inventory');
     die "no inventory module found\n" if !@modules;
 
+    # Support aborting
+    $SIG{TERM} = sub { $self->{aborted} = 1; };
+
     # first pass: compute all relevant modules
     foreach my $module (sort @modules) {
+        return if $self->{aborted};
+
         # compute parent module:
         my @components = split('::', $module);
         my $parent = @components > 5 ?
@@ -506,6 +463,8 @@ sub _initModulesList {
         ## no critic (ProhibitProlongedStrictureOverride)
         no strict 'refs'; ## no critic (ProhibitNoStrict)
 
+        return if $self->{aborted};
+
         # skip modules already disabled
         next unless $self->{modules}->{$module}->{enabled};
         # skip non-fallback modules
@@ -573,6 +532,7 @@ sub _runModule {
             params        => $self->{params},
             scan_homedirs => $self->{config}->{'scan-homedirs'},
             scan_profiles => $self->{config}->{'scan-profiles'},
+            assetname_support => $self->{config}->{'assetname-support'},
         }
     );
     $self->{modules}->{$module}->{done} = 1;
@@ -587,8 +547,12 @@ sub _feedInventory {
         grep { $self->{modules}->{$_}->{enabled} }
         keys %{$self->{modules}};
 
+    # Support aborting
+    $SIG{TERM} = sub { $self->{aborted} = 1; };
+
     foreach my $module (sort @modules) {
         $self->_runModule($module);
+        return if $self->{aborted};
     }
 
     # Inject additional content if required
@@ -617,10 +581,8 @@ sub _injectContent {
 
     my $content;
     if ($file =~ /\.xml$/) {
-        eval {
-            my $tree = XML::TreePP->new()->parsefile($file);
-            $content = $tree->{REQUEST}->{CONTENT};
-        };
+        my $tree = GLPI::Agent::XML->new(file => $file)->dump_as_hash();
+        $content = $tree->{REQUEST}->{CONTENT};
     } elsif ($file =~ /\.json$/) {
         die "Can't load GLPI Protocol Message library\n"
             unless GLPI::Agent::Protocol::Message->require();
@@ -644,60 +606,6 @@ sub _injectContent {
     }
 
     $self->{inventory}->mergeContent($content);
-}
-
-sub _printInventory {
-    my ($self, $handle) = @_;
-
-    my $format = $self->{inventory}->getFormat();
-
-    SWITCH: {
-        if ($format eq 'xml') {
-
-            my $tpp = XML::TreePP->new(
-                indent          => 2,
-                utf8_flag       => 1,
-                output_encoding => 'UTF-8'
-            );
-
-            print $handle $tpp->write({
-                REQUEST => {
-                    CONTENT  => $self->{inventory}->getContent(),
-                    DEVICEID => $self->{inventory}->getDeviceId(),
-                    QUERY    => "INVENTORY",
-                }
-            });
-
-            last SWITCH;
-        }
-
-        if ($format eq 'html') {
-            Text::Template->require();
-            my $template = Text::Template->new(
-                TYPE => 'FILE', SOURCE => "$self->{datadir}/html/inventory.tpl"
-            );
-
-             my $hash = {
-                version  => $GLPI::Agent::Version::VERSION,
-                deviceid => $self->{inventory}->getDeviceId(),
-                data     => $self->{inventory}->getContent(),
-                fields   => $self->{inventory}->getFields()
-            };
-
-            print $handle $template->fill_in(HASH => $hash);
-
-            last SWITCH;
-        }
-
-        if ($format eq 'json') {
-            my $json = $self->{inventory}->getContent();
-            print $handle $json->getContent();
-
-            last SWITCH;
-        }
-
-        die "unknown format $format\n";
-    }
 }
 
 1;

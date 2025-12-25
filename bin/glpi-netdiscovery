@@ -10,8 +10,10 @@ use English qw(-no_match_vars);
 use Getopt::Long;
 use Pod::Usage;
 
+use GLPI::Agent::Target::Local;
 use GLPI::Agent::Task::NetDiscovery;
 use GLPI::Agent::Task::NetDiscovery::Job;
+use GLPI::Agent::Config;
 use GLPI::Agent::Logger;
 use GLPI::Agent::Version;
 
@@ -32,6 +34,9 @@ GetOptions(
     'protocol=s@',
     'threads=i',
     'timeout=i',
+    'backend-collect-timeout=s',
+    'v1',
+    'v2c',
     'control',
     'debug+',
     'help',
@@ -64,9 +69,18 @@ pod2usage(
     -message => "\nsave folder must exist, aborting\n", -verbose => 0
 ) if ($options->{save} && ! -d $options->{save});
 
+if ($OSNAME eq 'MSWin32' && $options->{threads} > 1) {
+    GLPI::Agent::Tools::Win32->require();
+    GLPI::Agent::Tools::Win32::start_Win32_OLE_Worker();
+}
+
 my $discovery = GLPI::Agent::Task::NetDiscovery->new(
     %setup,
-    target => GLPI::Agent::Task::NetInventory::Target->new(),
+    target => GLPI::Agent::Target::Local->new(
+        path       => defined($options->{save}) ? $options->{save} : '-',
+        basevardir => $setup{vardir}
+    ),
+    config => GLPI::Agent::Config->new(options => $options),
     logger => GLPI::Agent::Logger->new(config => $options)
 );
 
@@ -74,8 +88,16 @@ my $credentials_id = 1;
 our @credentials;
 if ($options->{community}) {
     foreach my $community (@{$options->{community}}) {
-        push @credentials,
-            { ID => $credentials_id++, VERSION => 1, COMMUNITY => $community };
+        push @credentials, {
+            ID        => $credentials_id++,
+            VERSION   => '1',
+            COMMUNITY => $community
+        } unless $options->{v2c} && !$options->{v1};
+        push @credentials, {
+            ID        => $credentials_id++,
+            VERSION   => '2c',
+            COMMUNITY => $community
+        } if $options->{v2c};
     }
 } elsif ($options->{credentials}) {
     foreach my $specification (@{$options->{credentials}}) {
@@ -88,8 +110,15 @@ if ($options->{community}) {
     }
 } else {
     push @credentials, {
-        ID => $credentials_id++, VERSION => 1, COMMUNITY => 'public'
-    };
+        ID        => $credentials_id++,
+        VERSION   => '1',
+        COMMUNITY => 'public'
+    } unless $options->{v2c} && !$options->{v1};
+    push @credentials, {
+        ID        => $credentials_id++,
+        VERSION   => '2c',
+        COMMUNITY => 'public'
+    } if $options->{v2c};
 }
 
 $discovery->{jobs} = [
@@ -109,16 +138,16 @@ $discovery->{jobs} = [
                 PROTOCOL => $options->{protocol},
             }
         ],
-        file => $options->{file},
-        credentials => \@credentials
+        file        => $options->{file},
+        credentials => \@credentials,
+        netscan     => $options->{inventory},
+        showcontrol => $options->{control}
     )
 ];
+
 if (defined($options->{entity})) {
     $discovery->{jobs}->[0]->{ranges}->[0]->{ENTITY} = $options->{entity};
 }
-$discovery->{client} = GLPI::Agent::Task::NetDiscovery::Client->new(
-    logger => $discovery->{logger},
-);
 
 if ($options->{save} && $options->{debug}) {
     print STDERR
@@ -129,168 +158,7 @@ if ($options->{save} && $options->{debug}) {
     print STDERR "====\n";
 }
 
-# Set target expiration to 15 minutes if we are chaining inventory
-$discovery->run(
-    target_expiration   => $options->{inventory} ? 900 : 60
-);
-
-## no critic (ProhibitMultiplePackages)
-package GLPI::Agent::Task::NetDiscovery::Client;
-
-use threads;
-
-use English qw(-no_match_vars);
-use UNIVERSAL::require;
-
-use GLPI::Agent::Task::NetInventory;
-use GLPI::Agent::Task::NetInventory::Job;
-use GLPI::Agent::Logger;
-
-sub new {
-    my ($class, %params) = @_;
-
-    return bless {
-        logger  => $params{logger} ||
-            GLPI::Agent::Logger->new(config => $main::options),
-    }, $class;
-}
-
-sub netdiscovery { 1 }
-
-sub ip {}
-
-sub send {
-    my ($self, %params) = @_;
-
-    # Get options from main program
-    my $options = $main::options;
-    my $devices = $params{message}->{h}->{CONTENT}->{DEVICE};
-    my $device  = ref($devices) eq 'ARRAY' ? $devices->[0] :
-                  ref($devices) eq 'HASH'  ? $devices      : undef;
-
-    # don't display control message by default
-    return unless ($options->{control} || $device);
-
-    my $ip  = $device ? $device->{IP} || $self->ip() : undef;
-    my $xml = $params{message}->getContent();
-
-    if ($options->{save} && $device) {
-        die "No ip given with device\n" unless $ip;
-        if ($self->netdiscovery()) {
-            $self->{logger}->info("Saving $ip discovery infos as XML...");
-            _writeXml($options->{save} . "/netdiscovery", "$ip.xml", $xml);
-        } else {
-            if ($device->{ERROR}) {
-                my $message = $device->{ERROR}->{MESSAGE};
-                $self->{logger}->error("Inventory failed on $message");
-                $self->{logger}->error("Check your credentials") if $message =~ /timeout/;
-            } else {
-                $self->{logger}->info("Saving $ip inventory infos as XML...");
-                _writeXml($options->{save} . "/netinventory", "$ip.xml", $xml);
-            }
-        }
-    } else {
-        print $xml;
-    }
-
-    if ($self->netdiscovery() && $options->{inventory} && $device) {
-        die "No ip given with device\n" unless $ip;
-
-        unless ($device->{TYPE}) {
-            $self->{logger}->info("Skipping inventory for $ip on not recognized device type");
-            return;
-        }
-
-        unless ($device->{AUTHSNMP}) {
-            $self->{logger}->info("Skipping inventory for $ip on no SNMP response");
-            return;
-        }
-
-        my $inventory = GLPI::Agent::Task::NetInventory->new(
-            %main::setup,
-            target => GLPI::Agent::Task::NetInventory::Target->new(),
-            logger => GLPI::Agent::Logger->new(config => $options)
-        );
-
-        # Multi-threading still set on NetDiscovery task and we are only
-        # requesting one device scan
-        $inventory->{jobs} = [
-            GLPI::Agent::Task::NetInventory::Job->new(
-                params => {
-                    PID           => 1,
-                    THREADS_QUERY => 1,
-                    TIMEOUT       => $options->{timeout},
-                },
-                devices     => [{
-                    ID           => 0,
-                    IP           => $ip,
-                    PORT         => $options->{port}     ? $device->{AUTHPORT}     : '',
-                    PROTOCOL     => $options->{protocol} ? $device->{AUTHPROTOCOL} : '',
-                    AUTHSNMP_ID  => $device->{AUTHSNMP}
-                }],
-                credentials => \@{main::credentials},
-            )
-        ];
-
-        $inventory->{client} = GLPI::Agent::Task::NetInventory::Client->new(
-            logger  => $self->{logger},
-            ip      => $ip
-        );
-
-        $inventory->run();
-    }
-}
-
-sub _writeXml {
-    my ($folder, $file, $xml) = @_;
-
-    mkdir $folder unless -d $folder;
-
-    die "Can't create $folder directory: $!\n" unless -d $folder;
-
-    if (open(my $XML,">", $folder.'/'.$file)) {
-        print $XML $xml;
-        close($XML);
-    } else {
-        die "Failed to write '$folder/$file': $!\n";
-    }
-}
-
-package GLPI::Agent::Task::NetInventory::Target;
-
-sub new {
-    my ($class, %params) = @_;
-
-    return bless {}, $class;
-}
-
-sub getUrl {
-    my ($self, %params) = @_;
-
-    ## no critic (ExplicitReturnUndef)
-    return undef;
-}
-
-package GLPI::Agent::Task::NetInventory::Client;
-
-use parent -norequire, 'GLPI::Agent::Task::NetDiscovery::Client';
-
-sub new {
-    my ($class, %params) = @_;
-
-    my $self = $class->SUPER::new(%params);
-
-    $self->{_ip} = $params{ip};
-
-    return bless $self, $class;
-}
-
-sub netdiscovery { 0 }
-
-sub ip {
-    my ($self) = @_;
-    return $self->{_ip};
-}
+$discovery->run();
 
 __END__
 
@@ -309,8 +177,12 @@ glpi-netdiscovery [options] --first <address> --last <address>
     --port <PORT[,PORT2]>  SNMP port (161)
     --protocol <PROT[,P2]> SNMP protocol/domain (udp/ipv4)
     --community <STRING>   SNMP community string (public)
+    --v1                   select SNMP version 1 (the default)
+    --v2c                  select SNMP version 2c (1 by default)
     --credentials <STRING> SNMP credentials (version:1,community:public)
-    --timeout <TIME        SNMP timeout, in seconds (1)
+    --timeout <TIME>       SNMP timeout, in seconds (1)
+    --backend-collect-timeout <TIME>
+                           base expiration timeout, in seconds (180)
     --entity <ENTITY>      GLPI entity
     --threads <COUNT>      number of discovery threads (1)
     --control              output control messages
@@ -362,7 +234,16 @@ If no host or first ip is provided, ip is set to emulate 1.1.1.1 ip scan.
 
 =item B<--community> I<STRING>
 
-Use given string as SNMP community (assume SNMPv1).
+Use given string as SNMP community (assume SNMPv1). This option can be used multiple
+times to try different communities.
+
+=item B<--v1>
+
+Use SNMP v1. This is the default, but you can use the option to try SNMP v1 & SNMP v2c.
+
+=item B<--v2c>
+
+Use SNMP v2c. Can be used in combination with --v1 to try the 2 versions.
 
 =item B<--credentials> I<STRING>
 
@@ -373,15 +254,52 @@ comma-separated list of key:value authentication parameters, such as:
 
 =item * version:2c,community:public
 
-=item * version:3,username:admin,authprotocol:sha,authpassword:s3cr3t
+=item * version:3,username:admin,authpassword:s3cr3t,privpassword:s3cr3t
 
 =item * etc.
+
+=back
+
+Supported keys are:
+
+=over
+
+=item * version with value set to 1, 2c or 3
+
+=back
+
+In the case version is set to 1 or 2c:
+
+=over
+
+=item * community
+
+=back
+
+In the case version is set to 3:
+
+=over
+
+=item * username (required)
+
+=item * authpassword
+
+=item * authprotocol with value set to md5 (the default if not set) or sha
+
+=item * privpassword (required if authpassword is set)
+
+=item * privprotocol with value set to des (the default if not set), aes or 3des
 
 =back
 
 =item B<--timeout> I<TIME>
 
 Set SNMP timeout, in seconds.
+
+=item B<--backen-collect-timeout> I<TIME>
+
+Set base expiration timeout, in seconds. Global task expiration will depend on
+the number of ips.
 
 =item B<--entity> I<ENTITY>
 
@@ -411,7 +329,7 @@ Run a discovery against a network range, using multiple SNMP credentials:
 
     $> glpi-netdiscovery --first 192.168.0.1 --last 192.168.0.254 \
     --credentials version:2c,community:public \
-    --credentials version:3,username:admin,authprotocol:sha,authpassword:s3cr3t
+    --credentials version:3,username:admin,authpassword:s3cr3t,privpassword:s3cr3t
 
 Emulate discovery using a snmpwalk file:
 

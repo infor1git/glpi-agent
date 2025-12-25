@@ -30,7 +30,7 @@ sub doInventory {
     # Then lookup GRID_HOME in user's environment
     my $root = $user eq 'root' ? 1 : 0;
     my $grid_home = $root ? $ENV{GRID_HOME} : getFirstLine(command => "su - $user -c 'echo \$GRID_HOME'");
-    if (!$grid_home && has_file("/etc/oratab")) {
+    if (!$grid_home && canRead("/etc/oratab")) {
         my @oratab = getAllLines(file => "/etc/oratab");
         my $asm_for_re = $asm;
         $asm_for_re =~ s/\+/\\+/;
@@ -75,14 +75,13 @@ sub doInventory {
 sub _getDisksGroups {
     my (%params) = @_;
 
-    my $handle = getFileHandle(%params);
-    return unless $handle;
+    my @lines = getAllLines(%params)
+        or return;
 
     my @groups = ();
     my $line_count = 0;
-    while (my $line = <$handle>) {
+    foreach my $line (@lines) {
         # Cleanup line
-        chomp($line);
         $line = trimWhitespace($line);
 
         # Logic to skip header
@@ -109,8 +108,6 @@ sub _getDisksGroups {
             FREE        => int($infos[$#infos-3])
         };
     }
-
-    close $handle;
 
     return \@groups;
 }

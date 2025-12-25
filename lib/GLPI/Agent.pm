@@ -19,6 +19,7 @@ use GLPI::Agent::Target::Server;
 use GLPI::Agent::Tools;
 use GLPI::Agent::Tools::Hostname;
 use GLPI::Agent::Tools::UUID;
+use GLPI::Agent::Event;
 
 our $VERSION = $GLPI::Agent::Version::VERSION;
 my $PROVIDER = $GLPI::Agent::Version::PROVIDER;
@@ -211,7 +212,7 @@ sub runTarget {
 
     # the prolog/contact dialog must be done once for all tasks,
     # but only for server targets
-    my $response;
+    my ($response, $contact_response);
     my $client;
     my @plannedTasks = $target->plannedTasks();
     if ($target->isGlpiServer()) {
@@ -220,17 +221,9 @@ sub runTarget {
             if $EVAL_ERROR;
 
         $client = GLPI::Agent::HTTP::Client::GLPI->new(
-            logger          => $self->{logger},
-            timeout         => $self->{config}->{timeout},
-            user            => $self->{config}->{user},
-            password        => $self->{config}->{password},
-            proxy           => $self->{config}->{proxy},
-            ca_cert_file    => $self->{config}->{'ca-cert-file'},
-            ca_cert_dir     => $self->{config}->{'ca-cert-dir'},
-            no_ssl_check    => $self->{config}->{'no-ssl-check'},
-            no_compress     => $self->{config}->{'no-compression'},
-            ssl_cert_file   => $self->{config}->{'ssl-cert-file'},
-            agentid         => uuid_to_string($self->{agentid}),
+            logger  => $self->{logger},
+            config  => $self->{config},
+            agentid => uuid_to_string($self->{agentid}),
         );
 
         return $self->{logger}->error("Can't load GLPI Protocol CONTACT library")
@@ -260,7 +253,7 @@ sub runTarget {
             message => $contact,
         );
         unless ($response) {
-            $self->{logger}->error("No answer from server at ".$target->getUrl());
+            $self->{logger}->error("No supported answer from server at ".$target->getUrl());
             # Always fallback on legacy XML-based protocol on error
             $target->isGlpiServer('false');
             # Return true on net error
@@ -275,56 +268,6 @@ sub runTarget {
             return 1;
         }
 
-    } elsif ($target->isType('server')) {
-
-        return unless GLPI::Agent::HTTP::Client::OCS->require();
-
-        $client = GLPI::Agent::HTTP::Client::OCS->new(
-            logger          => $self->{logger},
-            timeout         => $self->{config}->{timeout},
-            user            => $self->{config}->{user},
-            password        => $self->{config}->{password},
-            proxy           => $self->{config}->{proxy},
-            ca_cert_file    => $self->{config}->{'ca-cert-file'},
-            ca_cert_dir     => $self->{config}->{'ca-cert-dir'},
-            no_ssl_check    => $self->{config}->{'no-ssl-check'},
-            no_compress     => $self->{config}->{'no-compression'},
-            ssl_cert_file   => $self->{config}->{'ssl-cert-file'},
-            agentid         => uuid_to_string($self->{agentid}),
-        );
-
-        return unless GLPI::Agent::XML::Query::Prolog->require();
-
-        my $prolog = GLPI::Agent::XML::Query::Prolog->new(
-            deviceid => $self->{deviceid},
-        );
-
-        $self->{logger}->info("sending prolog request to $target->{id}");
-        $response = $client->send(
-            url     => $target->getUrl(),
-            message => $prolog
-        );
-        unless ($response) {
-            $self->{logger}->error("No answer from server at ".$target->getUrl());
-            # Return true on net error
-            return 1;
-        }
-
-        # Check if we got a GLPI server answer
-        if (ref($response) =~ /^GLPI::Agent::Protocol::/) {
-            $self->{logger}->info("$target->{id} answer shows it supports GLPI Agent protocol");
-            $target->isGlpiServer('true');
-            return $self->runTarget($target) unless $response->expiration;
-        } else {
-            # update target
-            my $content = $response->getContent();
-            if (defined($content->{PROLOG_FREQ})) {
-                $target->setMaxDelay($content->{PROLOG_FREQ} * 3600);
-            }
-        }
-    }
-
-    if ($target->isGlpiServer()) {
         # Handle contact answer including expiration and/or errors
         my $message = $response->get('message');
         my $status  = $response->status;
@@ -357,6 +300,9 @@ sub runTarget {
         if ($disabled) {
             if (ref($disabled) eq 'ARRAY' && @{$disabled}) {
                 my %disabled = map { lc($_) => 1 } @{$disabled};
+                # Never disable remoteinventory as this is a special case when
+                # remote is set locally on agent side, but keep the info for future usage
+                $self->{_disabled_remoteinventory} = delete $disabled{remoteinventory};
                 # Never disable inventory if force option is used
                 delete $disabled{inventory} if $self->{config}->{force};
                 @plannedTasks = grep { ! exists($disabled{lc($_)}) } @plannedTasks;
@@ -372,19 +318,102 @@ sub runTarget {
         }
 
         my $tasks = $response->get("tasks");
-        # Handle no-category set by server on inventory task
-        if (ref($tasks) eq "HASH" && ref($tasks->{inventory}) eq 'HASH' && $tasks->{inventory}->{"no-category"}) {
-            my $no_category = [ sort split(/,+/, $tasks->{inventory}->{"no-category"}) ];
-            unless (@{$self->{config}->{"no-category"}} && join(",", sort @{$self->{config}->{"no-category"}}) eq join(",", @{$no_category})) {
-                $self->{logger}->debug("set no-category configuration to: ".$tasks->{inventory}->{"no-category"});
-                $self->{config}->{"no-category"} = $no_category;
+        # Handle tasks informations returned by server in CONTACT answer
+        if (ref($tasks) eq "HASH") {
+            # Only keep task server support for planned tasks
+            foreach my $task (map { lc($_) } @plannedTasks) {
+                next unless ref($tasks->{$task}) eq 'HASH';
+
+                # Keep task supporting announced by server
+                $target->setServerTaskSupport(
+                    $task => {
+                        server  => $tasks->{$task}->{server},
+                        version => $tasks->{$task}->{version},
+                    }
+                );
+
+                # Handle inventory task configuration
+                if ($task eq "inventory") {
+                    # Handle no-category set by server on inventory task
+                    if ($tasks->{inventory}->{"no-category"}) {
+                        my $no_category = [ sort split(/,+/, $tasks->{inventory}->{"no-category"}) ];
+                        unless (@{$self->{config}->{"no-category"}} && join(",", sort @{$self->{config}->{"no-category"}}) eq join(",", @{$no_category})) {
+                            $self->{logger}->debug("set no-category configuration to: ".$tasks->{inventory}->{"no-category"});
+                            $self->{config}->{"no-category"} = $no_category;
+                        }
+                    }
+                }
+            }
+        }
+
+        # Keep contact response
+        $contact_response = $response;
+    }
+
+    # By default, PROLOG request could be avoided when communicating with a GLPI server
+    # But it still may be required if we detect server supports any task due to glpiinventory plugin
+    if ($target->isType('server') && $target->doProlog()) {
+
+        return unless GLPI::Agent::HTTP::Client::OCS->require();
+
+        my $agentid;
+        # We may have to simulate a legacy PROLOG call if we just need to get an XML answer as
+        # we still known the server is a GLPI one. This is the case when we need to support
+        # glpiinventory plugin and then we just need to keep agentid undefined
+        $agentid = uuid_to_string($self->{agentid})
+            unless $target->isGlpiServer();
+
+        $client = GLPI::Agent::HTTP::Client::OCS->new(
+            logger  => $self->{logger},
+            config  => $self->{config},
+            agentid => $agentid,
+        );
+
+        return unless GLPI::Agent::XML::Query::Prolog->require();
+
+        my $prolog = GLPI::Agent::XML::Query::Prolog->new(
+            deviceid => $self->{deviceid},
+        );
+
+        $self->{logger}->info("sending prolog request to $target->{id}");
+        $response = $client->send(
+            url     => $target->getUrl(),
+            message => $prolog
+        );
+        unless ($response) {
+            $self->{logger}->error("No supported answer from server at ".$target->getUrl());
+            # Return true on net error
+            return 1;
+        }
+
+        # Check if we got a GLPI server answer
+        if (ref($response) =~ /^GLPI::Agent::Protocol::/) {
+            # Set and log server is a glpi one only if this is a new information
+            unless ($target->isGlpiServer()) {
+                $self->{logger}->info("$target->{id} answer shows it supports GLPI Agent protocol");
+                $target->isGlpiServer('true');
+                return $self->runTarget($target) unless $response->expiration;
+            }
+        } else {
+            # update target
+            my $content = $response->getContent();
+            # setMaxDelay has still been called after CONTACT request in target is a GLPI server
+            if (defined($content->{PROLOG_FREQ}) && !$target->isGlpiServer()) {
+                $target->setMaxDelay($content->{PROLOG_FREQ} * 3600);
             }
         }
     }
 
     foreach my $name (@plannedTasks) {
+        my $server_response = $response;
+        if ($contact_response) {
+            # Be sure to use expected response for task
+            my $task_server = $target->getTaskServer($name) // 'glpi';
+            $server_response = $contact_response
+                if $task_server eq 'glpi';
+        }
         eval {
-            $self->runTask($target, $name, $response);
+            $self->runTask($target, $name, $server_response);
         };
         $self->{logger}->error($EVAL_ERROR) if $EVAL_ERROR;
         $self->setStatus($target->paused() ? 'paused' : 'waiting');
@@ -432,45 +461,36 @@ sub runTaskReal {
     );
 
     # Handle init event and return
-    if ($self->{event} && $self->{event}->{init}) {
+    # init event first initiates maintenance event on deploy task
+    if ($self->{event} && $self->{event}->init) {
         my $event = $task->newEvent();
-        $target->addEvent($event) if $event;
+        $target->addEvent($event) if $event && $event->name;
         return;
     }
 
     return if $response && !$task->isEnabled($response);
 
-    $self->{logger}->info("running task $name".($self->{event} ? ": $self->{event}->{name} event" : ""));
+    my $event = $self->{event} ? $self->{event}->name : "";
+    $self->{logger}->info("running task $name".($event ? ": $event event" : ""));
     $self->{current_task} = $task;
 
-    $task->run(
-        user            => $self->{config}->{user},
-        password        => $self->{config}->{password},
-        proxy           => $self->{config}->{proxy},
-        ca_cert_file    => $self->{config}->{'ca-cert-file'},
-        ca_cert_dir     => $self->{config}->{'ca-cert-dir'},
-        no_ssl_check    => $self->{config}->{'no-ssl-check'},
-        no_compress     => $self->{config}->{'no-compression'},
-        ssl_cert_file   => $self->{config}->{'ssl-cert-file'},
-    );
+    $task->run();
 
-    # Try to cache data provided by the task if the next run can require it
-    if ($task->keepcache() && ref($self) =~ /Daemon/) {
-        my $cachedata = $task->cachedata();
-        if (defined($cachedata) && GLPI::Agent::Protocol::Message->require()) {
-            my $data = GLPI::Agent::Protocol::Message->new(message => $cachedata);
-            $self->forked_process_event("AGENTCACHE,$name,".$data->getRawContent());
-        }
-    }
+    # Handle task cache if required
+    $self->handleTaskCache($name, $task);
 
     # Try to handle task new event
-    my $event = $task->event();
-    if ($event && ref($self) =~ /Daemon/ && GLPI::Agent::Protocol::Message->require()) {
-        my $message = GLPI::Agent::Protocol::Message->new(message => $event);
-        $self->forked_process_event("TASKEVENT,$name,".$message->getRawContent());
-    }
+    $self->handleTaskEvent($name, $task);
 
     delete $self->{current_task};
+}
+
+# Only supported when running as daemon
+sub handleTaskCache {
+}
+
+# Only supported when running as daemon
+sub handleTaskEvent {
 }
 
 sub getStatus {
@@ -563,7 +583,15 @@ sub _handlePersistentState {
 
     if (!$self->{deviceid} && !$data->{deviceid}) {
         # compute an unique agent identifier, based on host name and current time
-        my $hostname = getHostname();
+        my %config = ();
+        if ($self->{config}->{'assetname-support'}) {
+            if ($self->{config}->{'assetname-support'} == 1) {
+                $config{short} = 1;
+            } elsif ($self->{config}->{'assetname-support'} == 3) {
+                $config{fqdn} = 1;
+            }
+        }
+        my $hostname = getHostname(%config);
 
         my ($year, $month , $day, $hour, $min, $sec) =
             (localtime (time))[5, 4, 3, 2, 1, 0];

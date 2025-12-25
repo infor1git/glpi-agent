@@ -2,17 +2,17 @@ package GLPI::Agent::Task::NetDiscovery;
 
 use strict;
 use warnings;
-use threads;
+
 use parent 'GLPI::Agent::Task';
 
 use constant DEVICE_PER_MESSAGE => 4;
 
 use English qw(-no_match_vars);
-use Net::IP;
 use Time::localtime;
 use Time::HiRes qw(usleep);
-use Thread::Queue v2.01;
 use UNIVERSAL::require;
+use Parallel::ForkManager;
+use File::Path qw(mkpath);
 
 use GLPI::Agent::Version;
 use GLPI::Agent::Tools;
@@ -20,7 +20,9 @@ use GLPI::Agent::Tools::Network;
 use GLPI::Agent::Tools::Hardware;
 use GLPI::Agent::Tools::Expiration;
 use GLPI::Agent::Tools::SNMP;
-use GLPI::Agent::XML::Query;
+use GLPI::Agent::HTTP::Client::OCS;
+# We need to preload MibSupport configuration before running threads
+use GLPI::Agent::SNMP::MibSupport;
 
 use GLPI::Agent::Task::NetDiscovery::Version;
 use GLPI::Agent::Task::NetDiscovery::Job;
@@ -67,6 +69,7 @@ sub isEnabled {
     }
 
     my @jobs;
+    # Parse and validate options
     foreach my $option (@options) {
         my @ranges;
         # RANGEIP is for legacy support of FusionInventory plugin
@@ -142,58 +145,11 @@ sub isEnabled {
     return 1;
 }
 
-sub _discovery_thread {
-    my ($self, $jobs, $done) = @_;
-
-    my $count = 0;
-
-    my $id = threads->tid();
-    $self->{logger}->debug("[thread $id] creation");
-
-    # run as long as they are a job to process
-    while (my $job = $jobs->dequeue()) {
-
-        last unless ref($job) eq 'HASH';
-        last if $job->{leave};
-
-        my $result = $self->_scanAddress($job);
-
-        if ($result && defined($job->{entity})) {
-            $result->{ENTITY} = $job->{entity};
-        }
-
-        # Only send result if a device was found which involves setting IP
-        $self->_sendResultMessage($result, $job->{pid})
-            if $result->{IP};
-
-        $done->enqueue($job);
-        $count ++;
-    }
-
-    delete $self->{logger}->{prefix};
-
-    $self->{logger}->debug2("[thread $id] processed $count scans");
-    $self->{logger}->debug("[thread $id] termination");
-}
-
 sub run {
-    my ($self, %params) = @_;
+    my ($self) = @_;
 
     my $abort = 0;
     $SIG{TERM} = sub { $abort = 1; };
-
-    # Prepare client configuration in needed to send message to server
-    $self->{_client_params} = {
-        logger       => $self->{logger},
-        user         => $params{user},
-        password     => $params{password},
-        proxy        => $params{proxy},
-        ca_cert_file => $params{ca_cert_file},
-        ca_cert_dir  => $params{ca_cert_dir},
-        no_ssl_check => $params{no_ssl_check},
-        no_compress  => $params{no_compress},
-        ssl_cert_file => $params{ssl_cert_file},
-    } if !$self->{client};
 
     # check discovery methods available
     if (canRun('arp')) {
@@ -228,16 +184,33 @@ sub run {
         );
     }
 
+    # Preload MibSupport
+    GLPI::Agent::SNMP::MibSupport::preload(
+        config  => $self->{config},
+        logger  => $self->{logger}
+    );
+
     # Extract greatest max_threads from jobs
     my ($max_threads) = sort { $b <=> $a } map { int($_->max_threads()) }
         @{$self->{jobs}};
 
-    my %running_threads = ();
-    my %queues = ();
+    # Prepare fork manager
+    my $tempdir = $self->{target}->getStorage()->getDirectory();
+    mkpath($tempdir);
+    my $manager = Parallel::ForkManager->new($max_threads > 1 ? $max_threads : 0, $tempdir);
+    $manager->set_waitpid_blocking_sleep(0);
 
-    # initialize FIFOs
-    my $jobs = Thread::Queue->new();
-    my $done = Thread::Queue->new();
+    my %jobs = ();
+    my $netscan = 0;
+
+    # Callback to update %queues
+    $manager->run_on_finish(
+        sub {
+            my ($pid, $ret, $jobid, $signal, $coredump, $params) = @_;
+            $jobs{$jobid}->updateQueue(%{$params})
+                if $jobid && $ret && $params;
+        }
+    );
 
     # Support glpimode providing required resources to request credentials
     my %glpimode;
@@ -269,7 +242,6 @@ sub run {
     }
 
     # Start jobs by preparing range queues and counting ips
-    my $max_count = 0;
     foreach my $job (@{$self->{jobs}}) {
         my $pid = $job->pid;
 
@@ -283,217 +255,381 @@ sub run {
             size                => 0,
         };
 
-        $self->{logger}->debug("initializing job $pid");
+        # We need to find if job is a netscan to compute the right expiration time
+        $netscan = 1 if $job->netscan();
 
-        # process each address block
+        $self->{logger}->debug("initializing job $jobid");
+
+        # process each iprange
         foreach my $range ($job->ranges()) {
-            my $start = $range->{start};
-            my $end   = $range->{end};
-            my $block = Net::IP->new( "$start-$end" );
-            if (!$block || !$block->ip() || $block->{binip} !~ /1/) {
-                $self->{logger}->error(
-                    "IPv4 range not supported by Net::IP: $start-$end"
-                );
-                next;
-            }
 
-            unless ($block->size()) {
-                $self->{logger}->error("Skipping empty range: $start-$end");
-                next;
-            }
+            $manager->start($jobid) and next;
 
-            $self->{logger}->debug("initializing block $start-$end");
+            my ($ret, $params) = $job->getQueueParams($range);
 
-            $queue->{size} += $block->size()->numify();
-            $range->{block} = $block;
-            push @{$queue->{ranges}}, $range;
+            $manager->finish($ret, $params);
         }
+    }
 
-        unless ($queue->{size}) {
-            $self->{logger}->debug("no valid block found for job $pid");
-            $self->_sendStartMessage($pid);
-            $self->_sendBlockMessage($pid, 0);
-            $self->_sendStopMessage($pid);
-            $self->_sendStopMessage($pid);
+    $manager->wait_all_children();
+
+    # Check computed jobs queue
+    my $max_count = 0;
+    my $minimum_timeout = 1;
+    foreach my $job (@{$self->{jobs}}) {
+        my $jobid = $job->pid;
+        my $size  = $job->queuesize;
+        unless ($size) {
+            $self->{logger}->debug("no valid block found for job $jobid");
+            # Always send control messages from a worker to avoid issue on win32
+            unless ($manager->start(0)) {
+                # Support glpi-netdiscovery --control option & local task from ToolBox
+                $self->{_control} = $job->control;
+                unless ($job->localtask) {
+                    $self->_sendStartMessage($jobid);
+                    $self->_sendBlockMessage($jobid, 0);
+                    $self->_sendStopMessage($jobid);
+                    $self->_sendStopMessage($jobid);
+                }
+                $manager->finish();
+            }
+            $manager->wait_all_children();
+            delete $jobs{$jobid};
             next;
         }
 
-        # Keep job as queue
-        $queues{$pid} = $queue;
-
         # Update total count
-        $max_count += $queue->{size};
-    }
+        $max_count += $size;
 
-    # Don't keep client until we created threads to avoid segfault if SSL is used
-    # we older openssl libs, but only if it is still not set by a script
-    delete $self->{client} if $self->{_client_params};
+        # Update minimum expiration
+        $minimum_timeout += $size * $job->timeout;
+    }
+    my $minimum_expiration = time + $minimum_timeout;
 
     # Define a realistic block scan expiration : at least one minute by address
-    my $target_expiration = $params{target_expiration} || 60;
-    $target_expiration = 60 if ($target_expiration < 60);
+
+    # Define a job expiration based on backend-collect-timeout but not less than 1 minute by device
+    # Always make it larger if running a netscan
+    my $target_expiration = $self->{config}->{'backend-collect-timeout'} || 60;
+    $target_expiration *= 5 if $netscan;
+    $target_expiration = 60 if $target_expiration < 60;
     setExpirationTime( timeout => $max_count * $target_expiration );
     my $expiration = getExpirationTime();
+    $expiration = $minimum_expiration if $expiration < $minimum_expiration;
     $self->_logExpirationHours($expiration);
 
-    # no need more threads than ips to scan
-    my $threads_count = $max_threads > $max_count ? $max_count : $max_threads;
-
-    $self->{logger}->debug("creating $threads_count worker threads");
-    for (my $i = 0; $i < $threads_count; $i++) {
-        my $newthread = threads->create(sub { $self->_discovery_thread($jobs, $done); });
-        # Keep known created threads in a hash
-        $running_threads{$newthread->tid()} = $newthread ;
-        usleep(50000) until ($newthread->is_running() || $newthread->is_joinable());
-    }
-
-    # Check really started threads number vs really running ones
-    my @really_running  = map { $_->tid() } threads->list(threads::running);
-    my @started_threads = keys(%running_threads);
-    unless (@really_running == $threads_count && keys(%running_threads) == $threads_count) {
-        $self->{logger}->debug(scalar(@really_running)." really running: [@really_running]");
-        $self->{logger}->debug(scalar(@started_threads)." started: [@started_threads]");
-    }
-
+    # no need more worker than ips to scan
+    my $worker_count = $max_threads > $max_count ? $max_count : $max_threads;
     my $queued_count = 0;
+
+    $self->{logger}->debug("using $worker_count netdiscovery worker".($worker_count > 1 ? "s" : ""));
+    $manager->set_max_procs($worker_count > 1 ? $worker_count : 0);
+
+    my @related_job;
     my $job_count = 0;
     my $jid_len = length(sprintf("%i",$max_count));
-    my $jid_pattern = "#%0".$jid_len."i";
+    my $jid_pattern = "#%0".$jid_len."i, ";
 
-    # We need to guaranty we don't have more than max_in_queue device in shared
-    # queue for each job
-    while (my @pids = sort { $a <=> $b } keys(%queues)) {
+    # Callback for processed scan
+    $manager->run_on_finish(
+        sub {
+            my ($pid, $ret, $worker, $signal, $coredump, $infos) = @_;
+            return unless $worker;
+            my $jobid = $related_job[$worker];
+            return unless $jobid;
+            my $job = $jobs{$jobid};
+            $queued_count--;
+            if ($job->done) {
+                # Support glpi-netdiscovery --control option & local task from ToolBox
+                $self->{_control} = $job->control;
 
-        # Enqueue as ip as possible
-        foreach my $pid (@pids) {
-            my $queue = $queues{$pid};
-            next unless @{$queue->{ranges}};
-            next if $queue->{in_queue} >= $queue->{max_in_queue};
-            my $range = $queue->{ranges}->[0];
-            my $block = $range->{block};
-            my $blockip = $block->ip();
-            # Still update block and handle range list
-            shift @{$queue->{ranges}} unless $range->{block} = $block + 1;
-            next unless $blockip;
-            my $address = {
-                ip                  => $blockip,
-                snmp_ports          => $range->{ports},
-                snmp_domains        => $range->{domains},
-                entity              => $range->{entity},
-                pid                 => $pid,
-                timeout             => $queue->{timeout},
-                snmp_credentials    => $queue->{snmp_credentials},
-                jid                 => sprintf($jid_pattern, ++$job_count),
-            };
-            $address->{walk} = $range->{walk} if $range->{walk};
-            # Don't forget to send initial start message to the server
-            unless ($queue->{started}) {
-                $queue->{started} = 1;
-                $self->_sendStartMessage($pid);
-                # Also send block size to the server
-                $self->_sendBlockMessage($pid, $queue->{size});
+                # send final message to the server before cleaning jobs
+                $self->_sendStopMessage($jobid) unless $job->localtask;
+
+                delete $jobs{$jobid};
+
+                # send final message to the server
+                $self->_sendStopMessage($jobid) unless $job->localtask;
             }
-            $queue->{in_queue} ++;
-            $jobs->enqueue($address);
-            $queued_count++;
+            # Update expiration time if required
+            if ($ret && $infos && $infos->{timeout} > 0) {
+                my $expiration = getExpirationTime() + $infos->{timeout};
+                setExpirationTime( expiration => $expiration );
+            }
+            $self->{logger}->debug(sprintf($jid_pattern, $worker)."worker termination");
         }
+    );
 
-        # as long as some of our threads are still running...
-        if (keys(%running_threads)) {
+    # We need to guaranty we don't have more than max_in_queue request in queue for each job
+    while (my @jobs = sort { $a <=> $b } keys(%jobs)) {
 
-            # send available results on the fly
-            while (my $address = $done->dequeue_nb()) {
-                my $pid = $address->{pid};
-                my $queue = $queues{$pid};
-                $queue->{in_queue} --;
-                $queued_count--;
-                unless ($queue->{in_queue} || @{$queue->{ranges}}) {
-                    # send final message to the server before cleaning threads
-                    $self->_sendStopMessage($pid);
+        # Enqueue as ip as possible for each job
+        foreach my $jobid (@jobs) {
+            # job may has just been done & deleted in run_on_finish() manager callback
+            my $job = $jobs{$jobid}
+                or next;
+            next unless $job->ranges;
+            next if $job->max_in_queue;
+            my $range = $job->range;
+            my $blockip = $job->nextip()
+                or next;
 
-                    delete $queues{$pid};
-
-                    # send final message to the server
-                    $self->_sendStopMessage($pid);
-                }
-                # Check if it's time to abort a thread or reduce expiration
-                $max_count--;
-                if ($max_count < $threads_count) {
-                    $jobs->enqueue({ leave => 1 });
-                    $threads_count--;
-                } else {
-                    # Only reduce expiration when still using all threads
-                    $expiration -= $target_expiration;
-                    $self->_logExpirationHours($expiration);
-                }
-            }
-
-            # wait for a little
-            usleep(50000);
+            $queued_count++;
 
             if ($expiration && time > $expiration) {
                 $self->{logger}->warning("Aborting netdiscovery task as it reached expiration time");
-                # detach all our running worker
-                foreach my $tid (keys(%running_threads)) {
-                    $running_threads{$tid}->detach()
-                        if $running_threads{$tid}->is_running();
-                    delete $running_threads{$tid};
-                }
+                $self->{logger}->info("You can set backend-collect-timout higher than the default to use a longer expiration timeout");
+                $abort ++;
                 last;
             }
 
             if ($abort) {
                 $self->{logger}->warning("Aborting netdiscovery task on TERM signal");
-                # detach all our running worker
-                foreach my $tid (keys(%running_threads)) {
-                    if ($running_threads{$tid}->is_running()) {
-                        $running_threads{$tid}->detach();
-                        $jobs->enqueue({ leave => 1 });
-                    }
-                    delete $running_threads{$tid};
-                }
                 last;
             }
 
-            # List our created and possibly running threads in a list to check
-            my %running_threads_checklist = map { $_ => 0 }
-                keys(%running_threads);
+            # Don't forget to send initial start message to the server
+            unless ($job->started) {
+                my $size = $job->queuesize;
+                my $max  = $job->max_threads;
+                $self->{logger}->debug("starting job $jobid with $size ip".($size > 1 ? "s" : "")." to scan using $max worker".($max > 1 ? "s" : ""));
+                # Always send control messages from a worker to avoid issue on win32
+                unless ($manager->start(0)) {
+                    # Support glpi-netdiscovery --control option & local task from ToolBox
+                    $self->{_control} = $job->control;
 
-            foreach my $running (threads->list(threads::running)) {
-                my $tid = $running->tid();
-                # Skip if this running thread tid is not is our started list
-                next unless exists($running_threads{$tid});
-
-                # Check a thread is still running
-                $running_threads_checklist{$tid} = 1 ;
+                    unless ($job->localtask) {
+                        $self->_sendStartMessage($jobid);
+                        # Also send block size to the server
+                        $self->_sendBlockMessage($jobid, $size);
+                    }
+                    $manager->finish();
+                }
+                $manager->wait_all_children();
             }
 
-            # Clean our started list from thread tid that don't run anymore
-            foreach my $tid (keys(%running_threads_checklist)) {
-                delete $running_threads{$tid}
-                    unless $running_threads_checklist{$tid};
+            $job_count++;
+
+            # Keep a reference to the related job for run_on_finish call
+            $related_job[$job_count] = $jobid;
+
+            # Start worker and still try to enqueue another ip for this job
+            $manager->start($job_count) and redo;
+
+            $self->{logger}->{prefix} = sprintf($jid_pattern, $job_count);
+
+            # We should better use a new client on fork
+            delete $self->{client}
+                if ref($self->{client}) eq "GLPI::Agent::HTTP::Client::OCS" && $worker_count > 1;
+
+            my $jobaddress = {
+                ip                  => $blockip,
+                snmp_ports          => $range->{ports},
+                snmp_domains        => $range->{domains},
+                entity              => $range->{entity},
+                pid                 => $jobid,
+                timeout             => $job->timeout,
+                snmp_credentials    => $range->{snmp_credentials}   || $job->snmp_credentials,
+                remote_credentials  => $range->{remote_credentials} || $job->remote_credentials
+            };
+            $jobaddress->{walk} = $range->{walk} if $range->{walk};
+
+            my $result = $self->_scanAddress($jobaddress);
+
+            if ($result && $result->{IP}) {
+                $result->{ENTITY} = $range->{entity} if defined($range->{entity});
+
+                # Keep _found private attribut from the result
+                my $found = delete $result->{_found};
+
+                my $authsnmp = $result->{AUTHSNMP};
+                my $deviceid;
+                # AUTHREMOTE can be set in results but is not actually supported by GLPI
+                my $authremote = delete $result->{AUTHREMOTE};
+                if (($authsnmp || $authremote) && $job->localtask) {
+                    # Don't keep authsnmp in result for local task
+                    delete $result->{AUTHSNMP};
+                    # For TooBox, we keep used authsnmp|authremote & ip_range for results page in target storage
+                    if ($self->{target}->isType('local')) {
+                        my $device = $self->_storeNetDiscoDevices(
+                            ip          => $result->{IP},
+                            credential  => $authsnmp || $authremote,
+                            ip_range    => $range->{name},
+                            # Set expiration to ~3 months (3*30*86400)
+                            expiration  => time + 7776000
+                        );
+                        # Still keep eventually known deviceid for later check
+                        $deviceid = $device->{deviceid}
+                            if defined($device->{deviceid});
+                    }
+                }
+
+                $self->_sendResultMessage($result, $jobid);
+
+                # Eventually chain with netinventory when requested
+                if ($job->netscan) {
+                    my $timeout = 15;
+                    if ($authsnmp) {
+                        my $credentials = [
+                            grep { $_->{ID} eq $authsnmp } @{$jobaddress->{snmp_credentials}}
+                        ];
+
+                        GLPI::Agent::Task::NetInventory->require();
+                        my $inventory = GLPI::Agent::Task::NetInventory->new(
+                            map { $_ => $self->{$_} } qw(config datadir target deviceid logger agentid)
+                        );
+
+                        GLPI::Agent::Task::NetInventory::Job->require();
+                        $timeout = $job->timeout >= 15 ? $job->timeout : 15;
+                        $inventory->{jobs} = [
+                            GLPI::Agent::Task::NetInventory::Job->new(
+                                params => {
+                                    PID           => $jobid,
+                                    THREADS_QUERY => 1,
+                                    TIMEOUT       => $timeout,
+                                    NO_START_STOP => 1
+                                },
+                                devices => [
+                                    {
+                                        ID          => 0,
+                                        IP          => $blockip,
+                                        PORT        => $result->{AUTHPORT}     // '',
+                                        PROTOCOL    => $result->{AUTHPROTOCOL} // '',
+                                        AUTHSNMP_ID => $authsnmp
+                                    }
+                                ],
+                                credentials => $credentials,
+                            )
+                        ];
+
+                        $inventory->{client} = $self->{client};
+                        $inventory->run();
+
+                    } elsif ($authremote) {
+                        my $collectdeviceid = sub {
+                            my ($inventory, $hostid) = @_;
+                            # No need to update deviceid if used one if the stored one
+                            return if ($hostid && ref($deviceid) eq 'HASH' && $inventory->getDeviceId() eq $deviceid->{$hostid})
+                                || ($deviceid && $inventory->getDeviceId() eq $deviceid);
+                            $self->_storeNetDiscoDevices(
+                                ip       => $result->{IP},
+                                deviceid => $inventory->getDeviceId(),
+                                hostid   => $hostid
+                            );
+                        };
+                        my $credentials = first { $_->{ID} eq $authremote } @{$jobaddress->{remote_credentials}};
+                        if ($credentials && $found) {
+
+                            # Reset timeout to backend-collect-timeout as first set one is only for discovery
+                            $timeout = $self->{config}->{"backend-collect-timeout"};
+                            $found->timeout($timeout);
+
+                            my ($path, $agentfolder);
+                            if ($self->{target}->isType('local')) {
+                                $agentfolder = $self->{target}->getPath() eq '.' ? 'inventory' : '';
+                                # When target path is agent folder, inventory should be saved in inventory subfolder
+                                $path = $self->{target}->getFullPath($agentfolder);
+                            }
+                            # As we still have run the connection part in _scanAddressByRemote(), we reuse the connected object
+                            if ($credentials->{TYPE} eq 'esx') {
+                                $found->serverInventory($path, $collectdeviceid, $deviceid);
+                            } else {
+                                # Setup a remote inventory as it is done in GLPI::Agent::Task::RemoteInventory
+                                GLPI::Agent::Task::Inventory->require();
+
+                                # Update local target path in the case it has been updated
+                                $self->{target}->setFullPath($path) if $agentfolder;
+
+                                my $task = GLPI::Agent::Task::Inventory->new(
+                                    logger      => $self->{logger},
+                                    config      => $self->{config},
+                                    datadir     => $self->{datadir},
+                                    target      => $self->{target},
+                                    agentid     => $self->{agentid},
+                                    deviceid    => $found->deviceid // $found->safe_url(),
+                                );
+
+                                # Set now task is a remote one
+                                $task->setRemote($found->protocol());
+
+                                setRemoteForTools($found);
+
+                                $task->run();
+
+                                $found->disconnect();
+
+                                resetRemoteForTools();
+                            }
+                        }
+                    }
+
+                    # Finish with return code to update task expiration
+                    $manager->finish(1, { timeout => $timeout });
+                }
             }
-            last unless keys(%running_threads);
+
+            delete $self->{logger}->{prefix} if $worker_count > 1;
+
+            $manager->finish(0);
         }
+
+        last if $abort;
+
+        # wait a little bit
+        usleep(50000);
+        $manager->reap_finished_children();
     }
+
+    $manager->wait_all_children();
+
+    $self->{logger}->debug($worker_count>1 ? "All netdiscovery workers terminated" : "Netdiscovery worker terminated");
 
     if ($queued_count) {
         $self->{logger}->error("$queued_count devices scan result missed");
     }
 
     # Send exit message if we quit during a job still being run
-    foreach my $pid (sort { $a <=> $b } keys(%queues)) {
-        $self->{logger}->error("job $pid aborted");
-        $self->_sendExitMessage($pid);
+    foreach my $jobid (sort { $a <=> $b } keys(%jobs)) {
+        $self->{logger}->warning("job $jobid aborted");
+        $self->_sendExitMessage($jobid) unless $jobs{$jobid}->localtask;
     }
-
-    # Cleanup joinable threads
-    $_->join() foreach threads->list(threads::joinable);
-    $self->{logger}->debug("All netdiscovery threads terminated")
-        unless threads->list(threads::running);
 
     # Reset expiration
     setExpirationTime();
+}
+
+sub _storeNetDiscoDevices {
+    my ($self, %params) = @_;
+
+    my $storage = $self->{target}->getStorage()
+        or return;
+
+    my $ip = $params{ip}
+        or return;
+
+    my $devices = $storage->restore(name => "NetDisco-Devices") // {};
+    my $hostid  = $params{hostid};
+    my $updated = $devices->{$ip} ? 0 : 1;
+    my $device  = $devices->{$ip} // {};
+
+    foreach my $key (qw{credential ip_range expiration deviceid}) {
+        next unless defined($params{$key});
+        if ($key eq 'deviceid' && $hostid) {
+            $device->{$key} = {} unless ref($device->{$key}) eq 'HASH';
+            next if defined($device->{$key}->{$hostid}) && $device->{$key}->{$hostid} eq $params{$key};
+            $device->{$key}->{$hostid} = $params{$key};
+        } else {
+            next if defined($device->{$key}) && $device->{$key} eq $params{$key};
+            $device->{$key} = $params{$key};
+        }
+        $updated++;
+    }
+
+    $devices->{$ip} = $device;
+    $storage->save(name => "NetDisco-Devices", data => $devices)
+        if $updated;
+
+    return $device;
 }
 
 sub _logExpirationHours {
@@ -521,7 +657,7 @@ sub _logExpirationHours {
         $remaining = sprintf("%.1f hour", $remaining);
     }
 
-    $self->{logger}->debug("Current run expiration timeout: $remaining");
+    $self->{logger}->debug("Current netdiscovery run expiration timeout: $remaining");
 }
 
 sub abort {
@@ -534,6 +670,9 @@ sub abort {
 sub _sendMessage {
     my ($self, $content) = @_;
 
+    # Load GLPI::Agent::XML::Query as late as possible
+    return unless GLPI::Agent::XML::Query->require();
+
     my $message = GLPI::Agent::XML::Query->new(
         deviceid => $self->{deviceid} || 'foo',
         query    => 'NETDISCOVERY',
@@ -544,25 +683,62 @@ sub _sendMessage {
     $self->{client} = GLPI::Agent::HTTP::Client::OCS->new(%{$self->{_client_params}})
         unless defined($self->{client});
 
-    $self->{client}->send(
-        url     => $self->{target}->getUrl(),
-        message => $message
-    );
+        if ($file) {
+            if ($OSNAME eq 'MSWin32' && Win32::Unicode::File->require()) {
+                $handle = Win32::Unicode::File->new('w', $file)
+                    or $self->{logger}->error("Can't write to $file: $ERRNO");
+            } else {
+                open($handle, '>', $file)
+                    or $self->{logger}->error("Can't write to $file: $ERRNO");
+            }
+            return unless $handle;
+        }
+
+        print $handle $message->getContent();
+
+        if ($file) {
+            close($handle);
+            $self->{logger}->info("Netdiscovery result for $ip saved in $file");
+        }
+
+    } elsif ($self->{target}->isType('server')) {
+        unless ($self->{client}) {
+            $self->{client} = GLPI::Agent::HTTP::Client::OCS->new(
+                logger  => $self->{logger},
+                config  => $self->{config},
+            );
+        }
+
+        $self->{client}->send(
+            url     => $self->{target}->getUrl(),
+            message => $message
+        );
+    }
 }
 
 sub _scanAddress {
     my ($self, $params) = @_;
 
-    my $logger = $self->{logger};
-    my $id     = threads->tid();
-    $logger->{prefix} = "[thread $id] $params->{jid}, ";
-    $logger->debug("scanning $params->{ip}");
+    $self->{logger}->debug("scanning $params->{ip}");
 
     # Used by unittest to test arp cases
     $self->{arp} = $params->{arp} if $params->{arp};
 
-    my %device = (
-        $INC{'Net/SNMP.pm'}      ? $self->_scanAddressBySNMP($params)    : (),
+    my %device;
+
+    # First eventually try to scan with remote credentials
+    if ($params->{remote_credentials}) {
+        %device = $self->_scanAddressByRemote($params);
+    }
+
+    # Skip snmp scanning if got an authenticated result
+    unless (!$INC{'Net/SNMP.pm'} || $device{AUTHREMOTE}) {
+        %device = $self->_scanAddressBySNMP($params);
+    }
+
+    # Then scan for standard network datas
+    %device = (
+        %device,
         $INC{'Net/NBName.pm'}    ? $self->_scanAddressByNetbios($params) : (),
         $INC{'Net/Ping.pm'}      ? $self->_scanAddressByPing($params)    : (),
         $self->{arp}             ? $self->_scanAddressByArp($params)     : (),
@@ -705,8 +881,13 @@ sub _scanAddressByNetbios {
         }
     }
 
-    $device{MAC} = $ns->mac_address();
-    $device{MAC} =~ tr/-/:/;
+    my $mac = $ns->mac_address();
+    if ($mac) {
+        $mac =~ tr/-/:/;
+        $mac = getCanonicalMacAddress($mac);
+        $device{MAC} = $mac
+            if $mac;
+    }
 
     return %device;
 }
@@ -736,6 +917,13 @@ sub _scanAddressBySNMP {
 
     foreach my $try (@{$tries}) {
         my $credential = $try->{credential};
+
+        # Set port & domain from credential if present and not set in try for ip range
+        $try->{port} = $credential->{PORT}
+            if !defined($try->{port}) && defined($credential->{PORT}) && $credential->{PORT} =~ /^\d+$/;
+        $try->{domain} = $credential->{PROTOCOL}
+            if !defined($try->{domain}) && $credential->{PROTOCOL} && $credential->{PROTOCOL} =~ /^udp|tcp$/;
+
         my $device = $self->_scanAddressBySNMPReal(
             ip         => $params->{ip},
             port       => $try->{port},
@@ -804,12 +992,95 @@ sub _scanAddressBySNMPReal {
 
     my $info = getDeviceInfo(
         snmp    => $snmp,
+        config  => $self->{config},
         datadir => $self->{datadir},
         logger  => $self->{logger},
     );
     return unless $info;
 
     return $info;
+}
+
+sub _scanAddressByRemote {
+    my ($self, $params) = @_;
+
+    my (%device, $error);
+    my %params = map { $_ => $self->{$_} } qw(config datadir target deviceid logger agentid);
+
+    foreach my $credential (@{$params->{remote_credentials}}) {
+
+        next unless $credential->{TYPE};
+
+        if ($credential->{TYPE} eq 'esx') {
+
+            GLPI::Agent::Task::ESX->require();
+
+            my $esxscan = GLPI::Agent::Task::ESX->new(%params);
+            $esxscan->timeout($params->{timeout});
+
+            if ($esxscan->connect(
+                host     => $params->{ip},
+                user     => $credential->{USERNAME},
+                password => $credential->{PASSWORD}
+            )) {
+                $device{_found} = $esxscan;
+            } else {
+                $error = $esxscan->lastError();
+                my %errors = (
+                    '405 Method Not Allowed' => 'not supporting VMWare SOAP API'
+                );
+                $error = $errors{$error} if $errors{$error};
+
+                # Anyway set COMPUTER type if we got an answer
+                $device{TYPE} = 'COMPUTER' if $error;
+            }
+        } else {
+
+            GLPI::Agent::Task::RemoteInventory::Remote->require();
+            URI->require();
+
+            my $url = URI->new("http://".$params->{ip});
+            my $userinfo = $credential->{USERNAME};
+            $userinfo .= ":".$credential->{PASSWORD} unless empty($credential->{PASSWORD});
+            $url->userinfo($userinfo) unless empty($userinfo);
+            $url->port($credential->{PORT}) unless empty($credential->{PORT});
+            $url->query("?mode=".$credential->{MODE}) unless empty($credential->{MODE});
+            $url->scheme($credential->{TYPE});
+
+            my $remote = GLPI::Agent::Task::RemoteInventory::Remote->new(
+                logger  => $self->{logger},
+                url     => $url->as_string(),
+                timeout => $params->{timeout},
+            );
+            next unless $remote->supported();
+
+            $remote->prepare();
+
+            $error = $remote->checking_error();
+            $device{_found} = $remote
+                unless $error;
+        }
+
+        # no result means either no host, no response, or invalid credentials
+        $self->{logger}->debug(
+            sprintf "- scanning %s%s with %s, credentials %s: %s",
+            $params->{ip},
+            $credential->{TYPE} ne 'esx' && $credential->{PORT} ? ':'.$credential->{PORT} : '',
+            $credential->{TYPE} eq 'esx' ? 'ESX' : $credential->{TYPE}.' RemoteInventory',
+            $credential->{ID},
+            $device{_found} ? 'success' : $error ? "no result, $error"  : 'no result'
+        );
+
+        if ($device{_found}) {
+            $device{AUTHREMOTE} = $credential->{ID};
+            $device{TYPE}       = 'COMPUTER';
+            last;
+        }
+
+        undef $error;
+    }
+
+    return %device;
 }
 
 sub _sendStartMessage {

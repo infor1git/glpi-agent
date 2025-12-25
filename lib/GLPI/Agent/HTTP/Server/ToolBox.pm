@@ -8,6 +8,7 @@ use parent "GLPI::Agent::HTTP::Server::Plugin";
 use English qw(-no_match_vars);
 use UNIVERSAL::require;
 use Text::Template;
+use URI;
 use URI::Escape;
 use HTML::Entities;
 use Encode qw(decode encode);
@@ -15,8 +16,9 @@ use File::stat;
 
 use GLPI::Agent::Tools;
 use GLPI::Agent::Tools::Hostname;
+use GLPI::Agent::Tools::UUID;
 
-our $VERSION = "1.0";
+our $VERSION = "1.3";
 
 my %api_match = (
     version             => \&_version,
@@ -28,14 +30,15 @@ my %api_match = (
     "configuration.css" => \&_file,
     "inventory.css"     => \&_file,
     "results.css"       => \&_file,
-    "flatpickr.min.css" => \&_file,
     "custom.css"        => \&_file,
     "mibsupport.css"    => \&_file,
-    "flatpickr.js"      => \&_file,
     "logo.png"          => \&_logo,
-    "config.png"        => \&_file,
-    "arrow-left.png"    => \&_file,
     "favicon.ico"       => \&_favicon,
+    "tabler-icons.min.css" => \&_file,
+    "fonts/tabler-icons.eot" => \&_file,
+    "fonts/tabler-icons.ttf" => \&_file,
+    "fonts/tabler-icons.woff" => \&_file,
+    "fonts/tabler-icons.woff2" => \&_file,
 );
 
 sub urlMatch {
@@ -138,7 +141,7 @@ sub init {
     $self->{htmldir} = $self->{server}->{htmldir} || '';
 
     # Normalize raw_edition
-    $self->config('raw_edition', $self->config('raw_edition') =~ /^0|no$/i ? 0 : 1);
+    $self->config('raw_edition', $self->yesno($self->config('raw_edition')));
 
     # Normalize headercolor as HTML color
     if ($self->config('headercolor')) {
@@ -166,7 +169,10 @@ sub init {
 
         # Create a default YAML when YAML file is missing
         if (! -e $self->{yamlconfig}) {
-            my $yaml_tiny = YAML::Tiny->read_string("---");
+            my $yaml_tiny = YAML::Tiny->read_string(join("\n",
+                "configuration:",
+                "  updating_support: yes"
+            ));
             $self->debug("Saving default ".$self->config('yaml')." file");
             $self->debug("YAML file: ".$self->{yamlconfig});
             $yaml_tiny->write($self->{yamlconfig});
@@ -178,7 +184,7 @@ sub init {
     $self->scan_yaml_files();
 
     # Pages may require some initialization
-    map { delete $_->{need_init} && $_->init() } values(%{$self->{_pages}});
+    map { $_->init() } grep { $_->need_init() } values(%{$self->{_pages}});
 
     # Stil update Result page
     $self->{_results}->xml_analysis() if $self->{_results};
@@ -227,6 +233,8 @@ sub handle {
     return &{$api_match{$self->{request}}}( $self, $client, $request, $clientIp );
 }
 
+sub need_init {}
+
 sub ajax_support {
     return 0;
 }
@@ -253,6 +261,8 @@ sub defaults {
         addnavlink  => undef,
         headercolor => undef,
         raw_edition => "no",
+        # Supported by class GLPI::Agent::HTTP::Server::Plugin
+        forbid_not_trusted => "no",
     };
 }
 
@@ -277,15 +287,27 @@ sub yaml_config_specs {
             type        => "readonly",
             value       => $self->yesno($self->config('raw_edition')),
             text        => "Raw YAML edition authorization",
+            only_if     => $self->isyes($yaml_config->{'yaml_navbar'}),
         },
         yaml_navbar => {
             category    => "Navigation bar",
             type        => $self->isyes($yaml_config->{updating_support}) ? "bool" : "readonly",
             value       => $self->yesno($yaml_config->{yaml_navbar}),
             text        => "Show Raw YAML navigation",
-            navbar      => "Raw YAML".($self->config('raw_edition') ? " edition" : ""),
+            navbar      => "Raw YAML".($self->isyes($self->config('raw_edition')) ? " edition" : ""),
             link        => "yaml",
+            icon        => "clipboard-text",
             index       => 100, # index in navbar
+        },
+        agent_home_navbar => {
+            category    => "Navigation bar",
+            type        => $self->isyes($yaml_config->{updating_support}) ? "bool" : "readonly",
+            value       => $self->yesno($yaml_config->{agent_home_navbar}),
+            text        => "Show agent home navigation",
+            navbar      => "Agent home",
+            link        => "agent-home", # agent home link is set dynamically when this is set to agent-home
+            icon        => "home",
+            index       => 110, # index in navbar
         },
         default_page => {
             category    => "Navigation",
@@ -437,6 +459,35 @@ sub read_yaml {
         }
     }
 
+    # Normalize some integer values
+    my $configuration = $self->yaml("configuration");
+    if ($configuration) {
+        map { $configuration->{$_} = int($configuration->{$_}) } grep { defined($configuration->{$_}) } qw{
+            session_timeout
+        };
+    }
+    my $jobs = $self->yaml("jobs");
+    if ($jobs) {
+        foreach my $job (values(%{$jobs})) {
+            map { $job->{$_} = int($job->{$_}) } grep { defined($job->{$_}) } qw{
+                last_run_date next_run_date
+            };
+            my $config = $job->{config}
+                or next;
+            map { $config->{$_} = int($config->{$_}) } grep { defined($config->{$_}) } qw{
+                threads timeout
+            };
+        }
+    }
+    my $credentials = $self->yaml("credentials");
+    if ($credentials) {
+        foreach my $credential (values(%{$credentials})) {
+            map { $credential->{$_} = int($credential->{$_}) } grep { defined($credential->{$_}) } qw{
+                port
+            };
+        }
+    }
+
     return 1;
 }
 
@@ -462,6 +513,8 @@ sub reload_yaml_on_change {
             $self->{_results}->reset();
         }
     }
+
+    return $reload_needed;
 }
 
 sub write_yaml {
@@ -535,7 +588,10 @@ sub write_yaml {
             if ($backup) {
                 $self->info("Making backup of YAML file: ".$self->config('yaml'));
                 my ($ext) = $self->config('yaml') =~ m|\.(ya?ml)$|;
-                $yaml_file = $self->confdir() . "/backup/" . $self->config('yaml');
+                my $backup_dir = $self->confdir() . "/backup";
+                # Be sure a backup folder exists
+                mkdir $backup_dir unless -d $backup_dir;
+                $yaml_file = $backup_dir . "/" . $self->config('yaml');
                 $yaml_file =~ s/\.ya?ml$//;
                 $yaml_file .= "$backup.$ext";
             } else {
@@ -548,6 +604,8 @@ sub write_yaml {
             }
             $yaml_tiny->write($yaml_file)
                 or $self->error("Failed to save ".$self->config('yaml').": $EVAL_ERROR");
+            # Reset YAML loaded time
+            $self->{_yaml_loaded_time}->{$yaml_file} = time;
         } elsif ($backup) {
             $self->error("Can't make backup of YAML file: ".$self->config('yaml'));
         } else {
@@ -621,8 +679,8 @@ sub _index {
     if ($request->method() eq 'POST') {
         $form = $self->_get_form($request->content());
 
-        if ($form->{'raw-yaml'}) {
-            if ($self->config('raw_edition')) {
+        if ($form->{'update'} && $form->{'raw-yaml'}) {
+            if ($self->isyes($self->config('raw_edition'))) {
                 $self->yaml( YAML::Tiny->read_string($form->{'raw-yaml'}) );
                 $self->need_save();
             }
@@ -706,9 +764,20 @@ sub _index {
                 or next;
             my $link = delete $config_specs->{$key}->{link}
                 or next;
+            my $icon = delete $config_specs->{$key}->{icon};
             next unless $self->isyes($config_specs->{$key}->{value});
+            # Update agent home navigation link if required
+            if ($link eq "agent-home") {
+                my ($scheme) = ref($request->uri()) =~ /^URI::(.+)$/;
+                if ($scheme && $scheme =~ /^http/) {
+                    my $uri = URI->new($scheme.'://'.$request->header('host').'/');
+                    $uri->port($self->{server}->{port})
+                        if $self->{server}->{port} && $self->{server}->{port} != $self->port();
+                    $link = $uri->canonical();
+                }
+            }
             my $index = delete $config_specs->{$key}->{index} || 0;
-            push @{$navbar{$index}}, [ $navbar, $link ];
+            push @{$navbar{$index}}, [ $navbar, $link, $icon ];
         }
     }
     foreach my $index (sort { $a <=> $b } keys(%navbar)) {
@@ -738,6 +807,8 @@ sub _index {
         template_path   => $self->{htmldir}."/toolbox",
         lang            => $yaml_config->{'language'} || $languages[0],
         default_lang    => $languages[0],
+        deviceid        => $self->{server}->{agent}->{deviceid},
+        agentid         => uuid_to_string($self->{server}->{agent}->{agentid}),
     };
 
     # Keep self ref in hash for template include support
@@ -753,7 +824,8 @@ sub _index {
         foreach my $config_specs (@config_specs) {
             foreach my $key (keys(%{$config_specs})) {
                 my $category = delete $config_specs->{$key}->{category};
-                $hash->{configuration_specs}->{$category}->{$key} = $config_specs->{$key};
+                $hash->{configuration_specs}->{$category}->{$key} = $config_specs->{$key}
+                    if !exists($config_specs->{$key}->{only_if}) || $config_specs->{$key}->{only_if};
             }
         }
         $hash->{title} = "ToolBox plugin Configuration";
@@ -985,6 +1057,8 @@ sub reset_edit {
 sub config {
     my ($self, $name, $value) = @_;
 
+    return unless $name;
+
     # Handle config in parent for pages
     return $self->{toolbox}->config($name, $value)
         if $self->{toolbox};
@@ -995,12 +1069,12 @@ sub config {
 
 sub yesno {
     my ($self, $value) = @_;
-    return $value && $value =~ /^1|yes$/i ? "yes" : "no";
+    return defined($value) && $value =~ /^1|yes|true$/i ? "yes" : "no";
 }
 
 sub isyes {
     my ($self, $value) = @_;
-    return $value && $value =~ /^1|yes$/i ? 1 : 0;
+    return defined($value) && $value =~ /^1|yes|true$/i ? 1 : 0;
 }
 
 sub page {
@@ -1036,7 +1110,7 @@ sub _fix_default_page_options {
     foreach my $list (@{$config_specs}) {
         foreach my $config (%{$list}) {
             my $page = $list->{$config};
-            next unless $page->{navbar} && $page->{link} && defined($page->{index});
+            next unless $page->{navbar} && $page->{link} && defined($page->{index}) && $page->{link} ne 'agent-home';
             next unless $self->isyes($page->{value});
             $enabled{$config} = $page;
         }

@@ -8,6 +8,8 @@ use parent 'GLPI::Agent::Target';
 use English qw(-no_match_vars);
 use URI;
 
+use GLPI::Agent::Tools;
+
 my $count = 0;
 
 sub new {
@@ -49,16 +51,14 @@ sub _getCanonicalURL {
         # Eventually split on a slash to get host and path
         if ($string =~ m{^([^/]+)[/](.*)$}) {
             $url->host($1);
-            $url->path($2);
+            $url->path($2 // '');
         } else {
             $url->host($string);
-            $url->path('front/inventory.php');
+            $url->path('');
         }
     } else {
-        die "invalid protocol for URL: $string"
+        die "invalid protocol for URL: $string\n"
             if $scheme ne 'http' && $scheme ne 'https';
-        # complete path if needed
-        $url->path('front/inventory.php') if !$url->path();
     }
 
     return $url;
@@ -105,6 +105,44 @@ sub plannedTasks {
     }
 
     return @{$self->{tasks} || []};
+}
+
+sub setServerTaskSupport {
+    my ($self, $task, $support) = @_;
+
+    return unless $task && ref($support) eq 'HASH';
+    return unless $support->{server} && $support->{version};
+
+    $self->{_server_task_support}->{lc($task)} = $support;
+}
+
+sub doProlog {
+    my $self = shift @_;
+
+    # Always do PROLOG if target is not supporting native inventory
+    # or doesn't report supported tasks as in 10.0.0-beta
+    my $task_support = $self->{_server_task_support}
+        or return 1;
+
+    return any { $task_support->{$_}->{server} eq 'glpiinventory' } keys(%{$task_support});
+}
+
+sub getTaskServer {
+    my ($self, $task) = @_;
+
+    $task = lc($task);
+
+    return unless $task && $self->{_server_task_support} && $self->{_server_task_support}->{$task};
+    return $self->{_server_task_support}->{$task}->{server};
+}
+
+sub getTaskVersion {
+    my ($self, $task) = @_;
+
+    $task = lc($task);
+
+    return '' unless $task && $self->{_server_task_support} && $self->{_server_task_support}->{$task};
+    return $self->{_server_task_support}->{$task}->{version} // '';
 }
 
 1;
@@ -156,3 +194,23 @@ Return the target type
 Initializes target tasks with supported ones if a list of tasks is provided
 
 Return an array of planned tasks.
+
+=head2 setServerTaskSupport($task, $support)
+
+Store given task support where $support is a hash with at least "server" and "version" keys.
+
+Return $support or undef.
+
+=head2 doProlog()
+
+Check if any server supported task requires us to request a PROLOG to server.
+
+Return true or false.
+
+=head2 getTaskServer($task)
+
+Return server name of supported task or undef.
+
+=head2 getTaskVersion($task)
+
+Return version of supported task or an empty string.

@@ -20,6 +20,10 @@ sub doInventory {
     my $inventory = $params{inventory};
     my $logger    = $params{logger};
 
+    my $videos = $inventory->getSection('VIDEOS') || [];
+    # Assume videos was detected via pci scan
+    return if @{$videos};
+
     $logger->debug("retrieving display information:");
 
     my $ddcprobeData;
@@ -51,6 +55,8 @@ sub doInventory {
                 /usr/X11R6/bin
                 |
                 /etc/X11
+                |
+                /usr/libexec
             )
             /X
         }x;
@@ -59,18 +65,27 @@ sub doInventory {
     }
 
     if ($xorgPid) {
-        my $link = "/proc/$xorgPid/fd/0";
-        if (has_file($link)) {
-            $xorgData = _parseXorgFd(file => $link);
-            $logger->debug_result(
-                 action => 'reading Xorg log file',
-                 data   => $xorgData
-            );
-        } else {
-            $logger->debug_result(
-                 action => 'reading Xorg log file',
-                 status => "non-readable link $link"
-            );
+        my $fd = 0;
+        my %read;
+        while (canRead("/proc/$xorgPid/fd/$fd")) {
+            my $link = ReadLink("/proc/$xorgPid/fd/$fd");
+            $fd++;
+            next unless $link =~ /\.log$/;
+            next if $read{$link};
+            if (has_file($link)) {
+                $xorgData = _parseXorgFd(file => $link);
+                $logger->debug_result(
+                     action => "reading $link Xorg log file",
+                     data   => $xorgData
+                );
+                last if $xorgData;
+                $read{$link} = 1;
+            } else {
+                $logger->debug_result(
+                     action => "reading $link Xorg log file",
+                     status => "non-readable link $link"
+                );
+            }
         }
     } else {
         $logger->debug_result(
@@ -104,26 +119,29 @@ sub doInventory {
 }
 
 sub _getDdcprobeData {
-    my $handle = getFileHandle(@_);
-    return unless $handle;
+    my (%params) = @_;
+
+    my @lines = getAllLines(%params)
+        or return;
 
     my $data;
-    while (my $line = <$handle>) {
+    foreach my $line (@lines) {
         $line =~ s/[[:cntrl:]]//g;
         $line =~ s/[^[:ascii:]]//g;
         $data->{$1} = $2 if $line =~ /^(\S+):\s+(.*)/;
     }
-    close $handle;
 
     return $data;
 }
 
 sub _parseXorgFd {
-    my $handle = getFileHandle(@_);
-    return unless $handle;
+    my (%params) = @_;
+
+    my @lines = getAllLines(%params)
+        or return;
 
     my $data;
-    while (my $line = <$handle>) {
+    foreach my $line (@lines) {
         if ($line =~ /Modeline\s"(\S+?)"/) {
             $data->{resolution} = $1 if !$data->{resolution};
         } elsif ($line =~ /Integrated Graphics Chipset:\s+(.*)/) {
@@ -138,8 +156,8 @@ sub _parseXorgFd {
             $data->{name} = $1;
         } elsif ($line =~ /VESA VBE OEM Product:\s*(.*)/) {
             $data->{product} = $1;
-        } elsif ($line =~ /VESA VBE Total Mem: (\d+)\s*(\w+)/i) {
-            $data->{memory} = $1 . $2;
+        } elsif ($line =~ /(?:VESA VBE Total Mem| Memory): (\d+)\s*(\w+)/i) {
+            $data->{memory} = $1 . substr($2, 0, 2);
         } elsif ($line =~ /RADEON\(0\): Chipset: "(.*?)"/i) {
             # ATI /Radeon
             $data->{name} = $1;
@@ -157,7 +175,6 @@ sub _parseXorgFd {
             $data->{product} = $1;
         }
     }
-    close $handle;
 
     return $data;
 }

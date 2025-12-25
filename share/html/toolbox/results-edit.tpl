@@ -24,6 +24,7 @@
     </div>{
   use Encode qw(encode);
   use HTML::Entities;
+  use URI::Escape;
   $device = $devices{$edit};
   $select_fields = "";
   @has_selected_fields = ();
@@ -103,9 +104,9 @@
           }
         }
         if ($fieldname && $fieldname eq 'credential') {
-          $OUT .= $credentials{$value} ? "<a href='$url_path/credentials?edit=$value'>".($credentials{$value}->{name} || $value)."</a>" : "";
+          $OUT .= $credentials{decode_entities($value)} ? "<a href='$url_path/credentials?edit=".uri_escape(encode("UTF-8", $value))."'>".($credentials{$value}->{name} || $value)."</a>" : "";
         } elsif ($fieldname && $fieldname eq 'ip_range') {
-          $OUT .= $ip_range{$value} ? "<a href='$url_path/ip_range?edit=$value'>".($ip_range{$value}->{name} || $value)."</a>" : "";
+          $OUT .= $ip_range{decode_entities($value)} ? "<a href='$url_path/ip_range?edit=".uri_escape(encode("UTF-8", $value))."'>".($ip_range{$value}->{name} || $value)."</a>" : "";
         } elsif ($fieldname && ($device->noedit($prefix.$fieldname) || !$do)) {
           $OUT .= $fieldname =~ /^type|source$/ ? _($value) : $value;
         } elsif ($fieldname && $do eq 'edit') {
@@ -128,11 +129,11 @@
             <input type='number' name='$editname' value='$value'/>";
           } elsif ($field->{type} eq 'date') {
             $OUT .= "
-            <input type='text' id='dt_$fieldname' name='$editname' value='$value' onclick='opendatetime(\"dt_$fieldname\", false)'/>
+            <input type='date' id='dt_$fieldname' name='$editname' value='$value'/>
             <input type='button' value='".(_"Reset")."' onclick='document.getElementById(\"dt_$fieldname\").value = \"$value\"'/>";
           } elsif ($field->{type} eq 'datetime') {
             $OUT .= "
-            <input type='text' id='dt_$fieldname' name='$editname' value='$value' onclick='opendatetime(\"dt_$fieldname\", true)'/>
+            <input type='datetime-local' id='dt_$fieldname' name='$editname' value='$value'/>
             <input type='button' value='".(_"Reset")."' onclick='document.getElementById(\"dt_$fieldname\").value = \"$value\"'/>";
           } elsif ($field->{type} eq 'textarea') {
             $OUT .= "
@@ -176,7 +177,7 @@
     <a href='$url_path/inventory' class='see-link'>".sprintf(_("See %s task"),$task.": ".$device->{ip}."/".encode('UTF-8', encode_entities($device->{ip_range})))."</a>";
       } elsif (!$device->isLocalInventory()) {
         $OUT .= "
-    <input class='submit-secondary' type='submit' name='submit/scan' value='".(_"Scan this device")."'/>";
+    <button class='secondary' type='submit' name='submit/scan' value='1' alt=".(_"Scan this device")."'><i class='primary ti ti-player-play-filled'></i>".(_"Scan this device")."</button>";
       }
     }
   }
@@ -186,9 +187,9 @@
       <div class='overlay-frame fields-frame' onclick='event.stopPropagation()'>"
       .$select_fields."
         <hr/>
-        <input type='button' class='big-button' onclick='toggle_all()' value='".(_"Reverse selection")."'/>
-        <input type='submit' class='big-button' name='submit/select-fields' value='".(_"Save the selection")."'/>
-        <input type='button' class='big-button' onclick='cancel_select()' value='".(_"Cancel")."'/>
+        <button type='button' class='big-button' onclick='toggle_all()' alt='".(_"Reverse selection")."'><i class='primary ti ti-select'></i>".(_"Reverse selection")."</button>
+        <button type='submit' class='big-button' name='submit/select-fields' value='1' alt='".(_"Save the selection")."'><i class='primary ti ti-device-floppy'></i>".(_"Save the selection")."</button>
+        <button type='button' class='big-button' onclick='cancel_select()' alt='".(_"Cancel")."'><i class='primary ti ti-x'></i>".(_"Cancel")."</button>
       </div>
     </div>
     <script>
@@ -265,21 +266,21 @@
     </div>";
     if ($do eq 'edit' && $has_selected_fields) {
       $OUT .= "
-    <div class='center'><input class='submit' type='submit' name='submit/set-selected-fields' value='".(_"Apply selected fields")."'/></div>";
+    <div class='center'><button class='secondary' type='submit' name='submit/set-selected-fields' value='1' alt='".(_"Apply selected fields")."'><i class='primary ti ti-device-floppy'></i>".(_"Apply selected fields")."</button></div>";
     }
   }
   $OUT .= "
     <hr/>".($do eq 'edit' ? "
-    <input class='submit' type='submit' name='submit/update' value='"._("Update")."'/>" : "")."
-    <input class='submit' type='submit' name='submit/delete-device' value='"._("Delete")."'/>";
+    <button class='big-button' type='submit' name='submit/update' value='1' alt='"._("Update")."'><i class='primary ti ti-device-floppy'></i>".(_"Update")."</button>" : "")."
+    <button class='big-button secondary-button' type='submit' name='submit/delete-device' value='1' alt='"._("Delete")."'><i class='primary ti ti-trash'></i>".(_"Delete")."</button>";
   if ($do eq 'edit') {
     if ($select_fields) {
       $OUT .= "
-    <input class='submit' type='button' onclick='select_fields()' value='".(_"Select fields for propagation")."'/>";
+    <button class='big-button secondary-button' type='button' onclick='select_fields()' value='1' alt='".(_"Select fields for propagation")."'><i class='primary ti ti-transfer-in'></i>".(_"Select fields for propagation")."</button>";
     }
     if (keys(%checked_fields)) {
       $OUT .= "
-    <input class='submit' type='submit' name='submit/stop-propagation' value='".(_"Stop fields propagation")."'/>";
+    <button class='big-button secondary-button' type='submit' name='submit/stop-propagation' value='1' alt=".(_"Stop fields propagation")."'><i class='primary ti ti-x'></i>".(_"Stop fields propagation")."</button>";
     }
   }}
     <hr/>
@@ -291,26 +292,4 @@
       <input type='hidden' name='next-edit' value='{$index < $#devices_order ? $devices_order[$index+1] : ""}'/>
       <div class='other-option'>{_"Go to next device after deletion"}</div>
     </div>
-  </form>{
-  $need_datetime ? "
-  <script src='$url_path/flatpickr.js'></script>
-  <script>
-    var dts =\{\};
-    function opendatetime(id, time) \{
-      var input = document.getElementById(id);
-      var dt = dts[id];
-      if (!dt) \{
-        dt = flatpickr(input, \{
-          'allowInput': true,
-          'enableTime': time,
-          'time_24hr': true,
-          'defaultHour': new Date().getHours(),
-          'defaultMinute': new Date().getMinutes(),
-        \});
-        dts[id] = dt;
-      \}
-      if (input.value) dt.setDate(input.value);
-      dt.open();
-    \}
-  </script>" : ""
-}
+  </form>

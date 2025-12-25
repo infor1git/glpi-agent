@@ -2,7 +2,7 @@
 
 Home:
 GLPI Agent:
-ToolBox Plugin:
+ToolBox GLPI Agent plugin:
 Inventory:
 Results:
 Raw YAML:
@@ -11,19 +11,24 @@ Configuration:
 IP range:
 IP Ranges:
 Credentials:
+Scheduling:
+Remotes:
+Tag:
+DeviceID:
+AgentID:
+Inventory tasks:
+Agent home:
 
 Edit:
 Update:
 Delete:
-Allow renaming:
+Rename:
 Revert selection:
 
 yes:
 no:
 
-From:
-to:
-of:
+From %d to %d of %s:
 
 Display (number of items):
 no limit:
@@ -33,6 +38,47 @@ Add:
 Name:
 Description:
 Cancel:
+Go back to list:
 
 Reset:
 Reverse selection:
+
+Type:
+Disable:
+Enable:
+First ip:
+Last ip:
+
+Delay:
+delay:
+timeslot:
+Timeslot:
+Timeslots:
+second:
+seconds:
+minute:
+minutes:
+hour:
+hours:
+day:
+days:
+week:
+weeks:
+start:
+duration:
+Duration:
+all:
+mon:
+tue:
+wed:
+thu:
+fri:
+sat:
+sun:
+monday:
+tuesday:
+wednesday:
+thursday:
+friday:
+saturday:
+sunday:

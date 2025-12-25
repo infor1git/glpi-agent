@@ -6,11 +6,11 @@ use warnings;
 use Test::Deep;
 use Test::Exception;
 use Test::More;
-use XML::TreePP;
 
+use GLPI::Agent::XML;
 use GLPI::Agent::XML::Query;
 
-plan tests => 7;
+plan tests => 8;
 
 my $message;
 throws_ok {
@@ -29,10 +29,12 @@ lives_ok {
 
 isa_ok($message, 'GLPI::Agent::XML::Query');
 
-my $tpp = XML::TreePP->new();
+my $xml = GLPI::Agent::XML->new(string => $message->getContent());
+
+isa_ok($xml, 'GLPI::Agent::XML');
 
 cmp_deeply(
-    scalar $tpp->parse($message->getContent()),
+    $xml->dump_as_hash(),
     {
         REQUEST => {
             DEVICEID => 'foo',
@@ -64,7 +66,7 @@ lives_ok {
 isa_ok($message, 'GLPI::Agent::XML::Query');
 
 cmp_deeply(
-    scalar $tpp->parse($message->getContent()),
+    $xml->string($message->getContent())->dump_as_hash(),
     {
         REQUEST => {
             CASTOR => [

@@ -7,7 +7,6 @@ use parent 'Exporter';
 use English qw(-no_match_vars);
 
 use GLPI::Agent::Tools;
-use Memoize;
 
 our @EXPORT = qw(
     getZone
@@ -16,11 +15,6 @@ our @EXPORT = qw(
     getReleaseInfo
     getSmbios
 );
-
-memoize('getZone');
-memoize('getPrtdiagInfos');
-memoize('getReleaseInfo');
-memoize('getSmbios');
 
 sub getZone {
     return canRun('zonename') ?
@@ -34,8 +28,8 @@ sub getPrtconfInfos {
         @_
     );
 
-    my $handle = getFileHandle(%params);
-    return unless $handle;
+    my @lines = getAllLines(%params)
+        or return;
 
     my $info = {};
 
@@ -44,8 +38,7 @@ sub getPrtconfInfos {
         [ $info, -1 ]
     );
 
-    while (my $line = <$handle>) {
-        chomp $line;
+    foreach my $line (@lines) {
 
         # new node
         if ($line =~ /^(\s*)Node \s 0x[a-f\d]+/x) {
@@ -100,9 +93,7 @@ sub getPrtconfInfos {
             }
             next;
         }
-
     }
-    close $handle;
 
     return $info;
 }
@@ -113,26 +104,27 @@ sub getPrtdiagInfos {
         @_
     );
 
-    my $handle = getFileHandle(%params);
-    return unless $handle;
+    my @lines = getAllLines(%params)
+        or return;
 
     my $info = {};
 
-    while (my $line = <$handle>) {
+    while (1) {
+        my $line = shift @lines;
+        last unless defined($line);
         next unless $line =~ /^=+ \s ([\w\s]+) \s =+$/x;
         my $section = $1;
-        $info->{memories} = _parseMemorySection($section, $handle)
+        $info->{memories} = _parseMemorySection($section, \@lines)
             if $section =~ /Memory/;
-        $info->{slots}  = _parseSlotsSection($section, $handle)
+        $info->{slots}  = _parseSlotsSection($section, \@lines)
             if $section =~ /(IO|Slots)/;
     }
-    close $handle;
 
     return $info;
 }
 
 sub _parseMemorySection {
-    my ($section, $handle) = @_;
+    my ($section, $lines) = @_;
 
     my ($offset, $callback);
 
@@ -157,14 +149,17 @@ sub _parseMemorySection {
 
         if ($section eq 'Memory Configuration') {
             # use next line to determine actual format
-            my $next_line = <$handle>;
+            my $next_line = shift @{$lines};
 
             # Skip next line if empty
-            $next_line = <$handle> if ($next_line =~ /^\s*$/);
+            $next_line = shift @{$lines} if defined($next_line) && $next_line =~ /^\s*$/;
+            return unless defined($next_line);
 
             if ($next_line =~ /^Segment Table/) {
                 # multi-table format: reach bank table
-                while ($next_line = <$handle>) {
+                while (1) {
+                    $next_line = shift @{$lines};
+                    return unless defined($next_line);
                     last if $next_line =~ /^Bank Table/;
                 }
 
@@ -254,11 +249,11 @@ sub _parseMemorySection {
         return;
     }
 
-    return _parseAnySection($handle, $offset, $callback);
+    return _parseAnySection($lines, $offset, $callback);
 }
 
 sub _parseSlotsSection {
-    my ($section, $handle) = @_;
+    my ($section, $lines) = @_;
 
     my ($offset, $callback);
 
@@ -339,22 +334,22 @@ sub _parseSlotsSection {
         return;
     };
 
-    return _parseAnySection($handle, $offset, $callback);
+    return _parseAnySection($lines, $offset, $callback);
 }
 
 sub _parseAnySection {
-    my ($handle, $offset, $callback) = @_;
+    my ($lines, $offset, $callback) = @_;
 
     # skip headers
     foreach my $i (1 .. $offset) {
-        <$handle>;
+        shift @{$lines};
     }
 
     # parse content
     my @items;
-    while (my $line = <$handle>) {
-        last if $line =~ /^$/;
-        chomp $line;
+    while (1) {
+        my $line = shift @{$lines};
+        last if !defined($line) || $line =~ /^$/;
         my @item = $callback->($line);
         push @items, @item if @item;
     }
@@ -375,9 +370,13 @@ sub getReleaseInfo {
 
     my ($fullname)            =
         $first_line =~ /^ \s+ (.+)/x;
-    my ($version, $date, $id) =
-        $fullname =~ /Solaris \s ([\d.]+) \s (?: (\d+\/\d+) \s)? (\S+)/x;
-    my ($subversion) = $id =~ /_(u\d+)/;
+    my ($version, $date, $id, $subversion);
+    if ($fullname =~ /Solaris/) {
+        ($version, $date, $id) = $fullname =~ /Solaris \s ([\d.]+) \s (?: (\d+\/\d+) \s)? (\S+)/x;
+        ($subversion) = $id =~ /_(u\d+)/;
+    } elsif ($fullname =~ /OpenIndiana/) {
+        ($version) = $fullname =~ /([\d.]+)/;
+    }
 
     return {
         fullname   => $fullname,
@@ -394,11 +393,11 @@ sub getSmbios {
         @_
     );
 
-    my $handle = getFileHandle(%params);
-    return unless $handle;
+    my @lines = getAllLines(%params)
+        or return;
 
     my ($infos, $current);
-    while (my $line = <$handle>) {
+    foreach my $line (@lines) {
         if ($line =~ /^ \d+ \s+ \d+ \s+ (\S+)/x) {
             $current = $1;
             next;
@@ -409,7 +408,6 @@ sub getSmbios {
             next;
         }
     }
-    close $handle;
 
     return $infos;
 }

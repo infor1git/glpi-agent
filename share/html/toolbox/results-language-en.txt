@@ -8,14 +8,14 @@ OS Name:
 Location:
 Manufacturer:
 Model:
-Type:
+
 UUID:
 Source:
 IP:
 IPs:
 MAC:
 Contact:
-SNMP Credential:
+Credential:
 IP Range:
 
 Networking:

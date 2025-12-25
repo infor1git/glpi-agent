@@ -15,9 +15,15 @@ Requires: perl(LWP)
 Requires: perl(Net::SSLeay)
 Requires: perl(Proc::Daemon)
 Requires: perl(Socket::GetAddrInfo)
+Requires: perl(DateTime)
+Requires: perl(Sys::Hostname)
+Requires: perl(XML::LibXML)
+Requires: perl(Parallel::ForkManager)
 #Recommended for inventory module
-#Requires: perl(Net::CUPS)
-#Requires: perl(Parse::EDID)
+Recommends: perl(Net::CUPS)
+Recommends: perl(Parse::EDID)
+#Recommended for remoteinventory task
+Recommends: perl(Net::SSH2)
 
 BuildArch:   noarch
 
@@ -157,7 +163,7 @@ OPTIONS="--debug "
 AGENTMODE[0]=none
 # FusionInventory Inventory or GLPI server URI
 # AGENTSERVER[0]=your.server.name
-# AGENTSERVER[0]=http://your.server.name/front/inventory.php
+# AGENTSERVER[0]=http://your.server.name/
 # AGENTSERVER[0]=http://your.glpiserveur.name/glpi/plugins/fusioninventory/
 # corresponds with --local=%{_localstatedir}/lib/%{name}
 # AGENTSERVER[0]=local
@@ -204,6 +210,7 @@ install -m 644 -D  contrib/unix/%{name}.service %{buildroot}%{_unitdir}/%{name}.
 %dir %{_sysconfdir}/%{name}
 %config(noreplace) %{_sysconfdir}/%{name}/agent.cfg
 %config(noreplace) %{_sysconfdir}/%{name}/conf.d
+%config(noreplace) %{_sysconfdir}/%{name}/basic-authentication-server-plugin.cfg
 %config(noreplace) %{_sysconfdir}/%{name}/inventory-server-plugin.cfg
 %config(noreplace) %{_sysconfdir}/%{name}/server-test-plugin.cfg
 %config(noreplace) %{_sysconfdir}/%{name}/ssl-server-plugin.cfg
@@ -239,10 +246,12 @@ install -m 644 -D  contrib/unix/%{name}.service %{buildroot}%{_unitdir}/%{name}.
 %{_datadir}/%{name}/lib/GLPI/Agent/Config.pm
 %{_datadir}/%{name}/lib/setup.pm
 %{_datadir}/%{name}/lib/GLPI/Agent/Daemon.pm
+%{_datadir}/%{name}/lib/GLPI/Agent/Event*
 %{_datadir}/%{name}/lib/GLPI/Agent/HTTP/Server.pm
 %{_datadir}/%{name}/lib/GLPI/Agent/HTTP/Client*
 %{_datadir}/%{name}/lib/GLPI/Agent/HTTP/Protocol
 %{_datadir}/%{name}/lib/GLPI/Agent/HTTP/Session.pm
+%{_datadir}/%{name}/lib/GLPI/Agent/HTTP/Server/BasicAuthentication.pm
 %{_datadir}/%{name}/lib/GLPI/Agent/HTTP/Server/Inventory.pm
 %{_datadir}/%{name}/lib/GLPI/Agent/HTTP/Server/Plugin.pm
 %{_datadir}/%{name}/lib/GLPI/Agent/HTTP/Server/Proxy.pm
@@ -282,7 +291,7 @@ install -m 644 -D  contrib/unix/%{name}.service %{buildroot}%{_unitdir}/%{name}.
 %{_datadir}/%{name}/lib/GLPI/Agent/Tools/Virtualization.pm
 %{_datadir}/%{name}/lib/GLPI/Agent/Tools/Win32*
 %{_datadir}/%{name}/lib/GLPI/Agent/Version.pm
-%{_datadir}/%{name}/lib/GLPI/Agent/XML/
+%{_datadir}/%{name}/lib/GLPI/Agent/XML*
 %{_datadir}/%{name}/lib/GLPI/Agent/Inventory/
 %{_datadir}/%{name}/lib/GLPI/Agent/Protocol/
 
@@ -336,6 +345,17 @@ fi
 
 
 %changelog
+* Mon Jan 9 2023 Guillaume Bougard <gbougard AT teclib DOT com>
+- Set Parallel::ForkManager dependency
+- Don't miss to include new GLPI::Agent::Event module
+
+* Wed Mar 16 2022 Guillaume Bougard <gbougard AT teclib DOT com>
+- Set Net::SSH2 dependency as weak dependency
+- Add Net::CUPS & Parse::EDID as weak dependency
+
+* Fri Mar 4 2022 Guillaume Bougard <gbougard AT teclib DOT com>
+- Add Net::SSH2 dependency for remoteinventory support
+
 * Fri Jun 11 2021 Guillaume Bougard <gbougard AT teclib DOT com>
 - Update to support new GLPI Agent protocol
 

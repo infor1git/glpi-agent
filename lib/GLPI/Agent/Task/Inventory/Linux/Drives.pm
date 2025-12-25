@@ -50,67 +50,59 @@ sub _getFilesystems {
                 pattern => qr/\sUUID="(\S*)"\s/
             );
         }
-    } else {
-        # otherwise fallback to filesystem-dependant utilities
-        my $has_dumpe2fs   = canRun('dumpe2fs');
-        my $has_xfs_db     = canRun('xfs_db');
-        my $has_dosfslabel = canRun('dosfslabel');
-        my %months = (
-            Jan => 1,
-            Feb => 2,
-            Mar => 3,
-            Apr => 4,
-            May => 5,
-            Jun => 6,
-            Jul => 7,
-            Aug => 8,
-            Sep => 9,
-            Oct => 10,
-            Nov => 11,
-            Dec => 12,
-        );
+    }
 
-        foreach my $filesystem (@filesystems) {
-            if ($filesystem->{FILESYSTEM} =~ /^ext(2|3|4|4dev)/ && $has_dumpe2fs) {
-                my $handle = getFileHandle(
-                    logger => $logger,
-                    command => "dumpe2fs -h $filesystem->{VOLUMN}"
-                );
-                next unless $handle;
-                while (my $line = <$handle>) {
-                    if ($line =~ /Filesystem UUID:\s+(\S+)/) {
-                        $filesystem->{SERIAL} = $1;
-                    } elsif ($line =~ /Filesystem created:\s+\w+\s+(\w+)\s+(\d+)\s+([\d:]+)\s+(\d{4})$/) {
-                        $filesystem->{CREATEDATE} = "$4/$months{$1}/$2 $3";
-                    } elsif ($line =~ /Filesystem volume name:\s*(\S.*)/) {
-                        $filesystem->{LABEL} = $1 unless $1 eq '<none>';
-                    }
+    # Anyway attempt to get details with filesystem-dependant utilities
+    my $has_dumpe2fs   = canRun('dumpe2fs');
+    my $has_xfs_db     = canRun('xfs_db');
+    my $has_fatlabel   = canRun('fatlabel');
+    my $has_dosfslabel = $has_fatlabel ? 0 : canRun('dosfslabel');
+
+    foreach my $filesystem (@filesystems) {
+        if ($filesystem->{FILESYSTEM} =~ /^ext(2|3|4|4dev)/ && $has_dumpe2fs) {
+            my @lines = getAllLines(
+                logger => $logger,
+                command => "dumpe2fs -h $filesystem->{VOLUMN}"
+            );
+            next unless @lines;
+            foreach my $line (@lines) {
+                if ($line =~ /Filesystem UUID:\s+(\S+)/) {
+                    $filesystem->{SERIAL} = $1
+                        unless $filesystem->{SERIAL};
+                } elsif ($line =~ /Filesystem created:\s+\w+\s+(\w+)\s+(\d+)\s+([\d:]+)\s+(\d{4})$/) {
+                    $filesystem->{CREATEDATE} = sprintf("%s/%02d/%02d %s", $4, month($1), $2, $3);
+                } elsif ($line =~ /Filesystem volume name:\s*(\S.*)/) {
+                    $filesystem->{LABEL} = $1 unless $1 eq '<none>';
                 }
-                close $handle;
-                next;
             }
+            next;
+        }
 
-            if ($filesystem->{FILESYSTEM} eq 'xfs' && $has_xfs_db) {
+        if ($filesystem->{FILESYSTEM} eq 'xfs' && $has_xfs_db) {
+            unless ($filesystem->{SERIAL}) {
                 $filesystem->{SERIAL} = getFirstMatch(
                     logger  => $logger,
                     command => "xfs_db -r -c uuid $filesystem->{VOLUMN}",
                     pattern => qr/^UUID =\s+(\S+)/
                 );
-                $filesystem->{LABEL} = getFirstMatch(
-                    logger  => $logger,
-                    command => "xfs_db -r -c label $filesystem->{VOLUMN}",
-                    pattern => qr/^label =\s+"(\S+)"/
-                );
-                next;
             }
+            $filesystem->{LABEL} = getFirstMatch(
+                logger  => $logger,
+                command => "xfs_db -r -c label $filesystem->{VOLUMN}",
+                pattern => qr/^label =\s+"(\S+)"/
+            );
+            next;
+        }
 
-            if ($filesystem->{FILESYSTEM} eq 'vfat' && $has_dosfslabel) {
-                $filesystem->{LABEL} = getFirstLine(
-                    logger  => $logger,
-                    command => "dosfslabel $filesystem->{VOLUMN}"
-                );
-                next;
-            }
+        if ($filesystem->{FILESYSTEM} eq 'vfat' && ($has_fatlabel || $has_dosfslabel)) {
+            my $label = getLastLine(
+                logger  => $logger,
+                command => ($has_fatlabel ? "fatlabel" : "dosfslabel")." ".$filesystem->{VOLUMN}
+            );
+            # Keep label only if last line starts with a non space character
+            $filesystem->{LABEL} = trimWhitespace($label)
+                if defined($label) && $label =~ /^\S/;
+            next;
         }
     }
 
@@ -167,14 +159,12 @@ sub _getFilesystems {
             foreach my $name (@names) {
                 # Check cryptsetup status for the found slave/device
                 unless ($cryptsetup{$name}) {
-                    my $handle = getFileHandle( command => "cryptsetup status $name" )
+                    my @lines = getAllLines(command => "cryptsetup status $name")
                         or next;
-                    while (my $line = <$handle>) {
-                        chomp $line;
+                    foreach my $line (@lines) {
                         next unless ($line =~ /^\s*(.*):\s*(.*)$/);
                         $cryptsetup{$name}->{uc($1)} = $2;
                     }
-                    close $handle;
                 }
                 next unless $cryptsetup{$name};
 
@@ -197,14 +187,15 @@ sub _getFilesystemsFromHal {
 }
 
 sub _parseLshal {
-    my $handle = getFileHandle(@_);
-    return unless $handle;
+    my (%params) = @_;
+
+    my @lines = getAllLines(%params)
+        or return;
 
     my $devices = [];
     my $device = {};
 
-    while (my $line = <$handle>) {
-        chomp $line;
+    foreach my $line (@lines) {
         if ($line =~ m{^udi = '/org/freedesktop/Hal/devices/(volume|block).*}) {
             $device = {};
             next;
@@ -235,7 +226,6 @@ sub _parseLshal {
             $device->{ISVOLUME} = 1;
         }
     }
-    close $handle;
 
     return $devices;
 }

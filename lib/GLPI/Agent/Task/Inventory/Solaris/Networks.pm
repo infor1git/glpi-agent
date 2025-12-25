@@ -34,7 +34,7 @@ sub doInventory {
     my $logger    = $params{logger};
 
     my $routes = getRoutingTable(logger => $logger);
-    my $default = $routes->{'0.0.0.0'};
+    my $default = $routes->{'0.0.0.0'} // $routes->{'default'};
 
     my @interfaces = _getInterfaces(logger => $logger);
     foreach my $interface (@interfaces) {
@@ -63,26 +63,40 @@ sub _getInterfaces {
         @_
     );
 
+    my $has_dladm = canRun('/usr/sbin/dladm');
+
     foreach my $interface (@interfaces) {
         $interface->{IPSUBNET} = getSubnetAddress(
             $interface->{IPADDRESS},
             $interface->{IPMASK}
         );
 
-        $interface->{SPEED} = _getInterfaceSpeed(
-            name => $interface->{DESCRIPTION}
-        );
+        my $name = $interface->{DESCRIPTION}
+            or next;
+
+        my $speed;
+        if ($has_dladm) {
+            $speed = _getInterfaceSpeedviaDladm(
+                logger => $params{logger},
+                name   => $name
+            );
+        } else {
+            $speed = _getInterfaceSpeed(
+                logger => $params{logger},
+                name   => $name
+            );
+        }
+        $interface->{SPEED} = $speed if $speed;
     }
 
-    my $zone = getZone();
-    my $OSLevel = Uname("-r");
-
-    if ($zone && $OSLevel && $OSLevel =~ /5.10/) {
+    if ($has_dladm) {
         push @interfaces, _parseDladm(
             command => '/usr/sbin/dladm show-aggr',
             logger  => $params{logger}
         );
+    }
 
+    if (canRun('/usr/sbin/fcinfo')) {
         push @interfaces, _parsefcinfo(
             command => '/usr/sbin/fcinfo hba-port',
             logger  => $params{logger}
@@ -90,6 +104,16 @@ sub _getInterfaces {
     }
 
     return @interfaces;
+}
+
+sub  _getInterfaceSpeedviaDladm {
+    my (%params) = @_;
+
+    return getFirstMatch(
+        command => "/usr/sbin/dladm show-phys $params{name}",
+        pattern => qr/^$params{name}\s+\S+\s+\S+\s+(\d+)\s+/,
+        %params
+    );
 }
 
 sub  _getInterfaceSpeed {
@@ -119,13 +143,15 @@ sub  _getInterfaceSpeed {
 }
 
 sub _parseIfconfig {
-    my $handle = getFileHandle(@_);
-    return unless $handle;
+    my (%params) = @_;
+
+    my @lines = getAllLines(%params)
+        or return;
 
     my @interfaces;
     my $interface;
 
-    while (my $line = <$handle>) {
+    foreach my $line (@lines) {
         if ($line =~ /^(\S+):(\S+):/) {
             # new interface
             push @interfaces, $interface if $interface;
@@ -148,6 +174,9 @@ sub _parseIfconfig {
 
         if ($line =~ /inet ($ip_address_pattern)/) {
             $interface->{IPADDRESS} = $1;
+        } elsif ($line =~ /inet6 (\S+)\/(\d+)/) {
+            $interface->{IPADDRESS6} = $1;
+            $interface->{IPMASK6} = getNetworkMaskIPv6($2);
         }
         if ($line =~ /netmask ($hex_ip_address_pattern)/i) {
             $interface->{IPMASK} = hex2canonical($1);
@@ -161,7 +190,6 @@ sub _parseIfconfig {
             $interface->{STATUS} = "Up";
         }
     }
-    close $handle;
 
     # last interface
     push @interfaces, $interface if $interface;
@@ -170,11 +198,13 @@ sub _parseIfconfig {
 }
 
 sub _parseDladm {
-    my $handle = getFileHandle(@_);
-    return unless $handle;
+    my (%params) = @_;
+
+    my @lines = getAllLines(%params)
+        or return;
 
     my @interfaces;
-    while (my $line = <$handle>) {
+    foreach my $line (@lines) {
         next if $line =~ /device/;
         next if $line =~ /key/;
         my $interface = {
@@ -189,19 +219,20 @@ sub _parseDladm {
         $interface->{STATUS}      = 'Up' if $line =~ /UP/;
         push @interfaces, $interface;
     }
-    close $handle;
 
     return @interfaces;
 }
 
 sub _parsefcinfo {
-    my $handle = getFileHandle(@_);
-    return unless $handle;
+    my (%params) = @_;
+
+    my @lines = getAllLines(%params)
+        or return;
 
     my @interfaces;
     my $inc = 1;
     my $interface;
-    while (my $line = <$handle>) {
+    foreach my $line (@lines) {
         $interface->{DESCRIPTION} = "HBA_Port_WWN_" . $inc
             if $line =~ /HBA Port WWN:\s+(\S+)/;
         $interface->{DESCRIPTION} .= " " . $1
@@ -230,7 +261,6 @@ sub _parsefcinfo {
             $inc++;
         }
     }
-    close $handle;
 
     return @interfaces;
 }

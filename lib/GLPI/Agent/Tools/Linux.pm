@@ -11,7 +11,6 @@ use constant SPEED_UNKNOWN =>      65535 ; # See linux/ethtool.h, to be read as 
 
 use English qw(-no_match_vars);
 use File::Basename qw(basename dirname);
-use Memoize;
 use Socket qw(PF_INET SOCK_DGRAM);
 
 use GLPI::Agent::Tools;
@@ -27,9 +26,8 @@ our @EXPORT = qw(
     getInterfacesFromIfconfig
     getInterfacesFromIp
     getInterfacesInfosFromIoctl
+    getDefaultGatewayFromIp
 );
-
-memoize('getDevicesFromUdev');
 
 sub getDevicesFromUdev {
     my (%params) = @_;
@@ -73,11 +71,11 @@ sub getDevicesFromUdev {
 sub _parseUdevEntry {
     my (%params) = @_;
 
-    my $handle = getFileHandle(%params);
-    return unless $handle;
+    my @lines = getAllLines(%params)
+        or return;
 
     my ($result, $serial);
-    while (my $line = <$handle>) {
+    foreach my $line (@lines) {
         if ($line =~ /^S:.*-scsi-(\d+):(\d+):(\d+):(\d+)/) {
             $result->{SCSI_COID} = $1;
             $result->{SCSI_CHID} = $2;
@@ -99,7 +97,6 @@ sub _parseUdevEntry {
             $result->{DESCRIPTION} = $1;
         }
     }
-    close $handle;
 
     if (!$result->{SERIALNUMBER}) {
         $result->{SERIALNUMBER} = $serial;
@@ -116,11 +113,11 @@ sub getCPUsFromProc {
         @_
     );
 
-    my $handle = getFileHandle(%params);
+    my @lines = getAllLines(%params);
 
     my (@cpus, $cpu);
 
-    while (my $line = <$handle>) {
+    foreach my $line (@lines) {
         if ($line =~ /^([^:]+\S) \s* : \s (.+)/x) {
             $cpu->{lc($1)} = trimWhitespace($2);
         } elsif ($line =~ /^$/) {
@@ -130,7 +127,6 @@ sub getCPUsFromProc {
             undef $cpu;
         }
     }
-    close $handle;
 
     # push remaining cpu to the list, if it is valid cpu
     push @cpus, $cpu if $cpu && _isValidCPU($cpu);
@@ -158,12 +154,12 @@ sub getDevicesFromHal {
         $params{dump}->{lshal} = getAllLines(%params);
     }
 
-    my $handle = getFileHandle(%params);
+    my @lines = getAllLines(%params)
+        or return;
 
     my (@devices, $device);
 
-    while (my $line = <$handle>) {
-        chomp $line;
+    foreach my $line (@lines) {
         if ($line =~ m{^udi = '/org/freedesktop/Hal/devices/(storage|legacy_floppy|block)}) {
             $device = {};
             next;
@@ -192,7 +188,6 @@ sub getDevicesFromHal {
             $device->{DISKSIZE} = int($value/(1024*1024) + 0.5);
         }
     }
-    close $handle;
 
     return @devices;
 }
@@ -279,6 +274,14 @@ sub getDevicesFromProc {
                     'removable' : 'disk'
         };
 
+        # Wrong ATA manufacturer, still try to found it from found model
+        if ($device->{MANUFACTURER} && $device->{MANUFACTURER} eq 'ATA' && $device->{MODEL}) {
+            my $manufacturer = getCanonicalManufacturer($device->{MODEL});
+            $device->{MANUFACTURER} = $manufacturer
+                unless $manufacturer eq $device->{MODEL};
+            $device->{DESCRIPTION} = "SATA" if $name =~ /^sd/;
+        }
+
         # WWN
         my $wwn = _getValueFromSysProc($logger, $name, 'wwid', $root, $dump);
         $device->{WWN} = $wwn if $wwn && $wwn =~ s/^naa\./wwn-/;
@@ -287,7 +290,8 @@ sub getDevicesFromProc {
         foreach my $subsystem ("device/subsystem","device/device/subsystem") {
             my $link = _readLinkFromSysFs("/sys/block/$name/$subsystem", $root, $dump);
             next unless ($link && $link =~ m|^/sys/bus/(\w+)$|);
-            $device->{DESCRIPTION} = uc($1);
+            $device->{DESCRIPTION} = uc($1)
+                unless $device->{DESCRIPTION} && $device->{DESCRIPTION} eq "SATA" && $1 eq "scsi";
             last;
         }
 
@@ -325,7 +329,7 @@ sub _getValueFromSysProc {
 
     ## no critic (ExplicitReturnUndef)
 
-    my $file = first { has_file($root.$_) }
+    my $file = first { canRead($root.$_) }
         "/sys/block/$device/$key",
         "/sys/block/$device/device/$key",
         "/proc/ide/$device/$key",
@@ -514,8 +518,8 @@ sub getInterfacesFromIfconfig {
         command => '/sbin/ifconfig -a',
         @_
     );
-    my $handle = getFileHandle(%params);
-    return unless $handle;
+    my @lines = getAllLines(%params)
+        or return;
 
     my @interfaces;
     my $interface;
@@ -524,14 +528,14 @@ sub getInterfacesFromIfconfig {
         Ethernet => 'ethernet',
     );
 
-    while (my $line = <$handle>) {
+    foreach my $line (@lines) {
         if ($line =~ /^$/) {
             # end of interface section
             push @interfaces, $interface if $interface;
             next;
         }
 
-        if ($line =~ /^([\w\d.]+)/) {
+        if ($line =~ /^([\w\d\.:]+[\w\d]):?\s/) {
             # new interface
 
             $interface = {
@@ -589,9 +593,7 @@ sub getInterfacesFromIfconfig {
         if ($line =~ /Link encap:(\S+)/) {
             $interface->{TYPE} = $types{$1};
         }
-
     }
-    close $handle;
 
     return @interfaces;
 }
@@ -605,12 +607,13 @@ sub getInterfacesInfosFromIoctl {
     return unless $params{interface};
 
     # We don't support this feature on remote inventory
-    return if $GLPI::Agent::Tools::remote;
+    return { ERROR => "syscall not remotely supported" }
+        if $GLPI::Agent::Tools::remote;
 
     my $logger = $params{logger};
 
     socket(my $socket, PF_INET, SOCK_DGRAM, 0)
-        or return ;
+        or return { ERROR => "can't open socket" };
 
     # Pack command in ethtool_cmd struct
     my $cmd = pack("L3SC6L2SC2L3", ETHTOOL_GSET);
@@ -619,7 +622,8 @@ sub getInterfacesInfosFromIoctl {
     my $request = pack("a16p", $params{interface}, $cmd);
 
     my $retval = ioctl($socket, SIOCETHTOOL, $request) || -1;
-    return if ($retval < 0);
+    return { ERROR => "$!" }
+        if $retval < 0;
 
     # Unpack returned datas
     my @datas = unpack("L3SC6L2SC2L3", $cmd);
@@ -632,6 +636,7 @@ sub getInterfacesInfosFromIoctl {
     # Forget speed value if got unknown speed special value
     if ($datas->{SPEED} == SPEED_UNKNOWN) {
         delete $datas->{SPEED};
+        $datas->{ERROR} = "unknown speed found";
         $logger->debug2("Unknown speed found on $params{interface}")
             if $logger;
     }
@@ -645,15 +650,17 @@ sub getInterfacesFromIp {
         @_
     );
 
-    my $handle = getFileHandle(%params);
-    return unless $handle;
+    my @lines = getAllLines(%params)
+        or return;
 
     my (@interfaces, @addresses, $interface);
 
-    while (my $line = <$handle>) {
+    foreach my $line (@lines) {
         if ($line =~ /^\d+:\s+(\S+): <([^>]+)>/) {
 
             if (@addresses) {
+                push @interfaces, $interface
+                    if !any { $_->{DESCRIPTION} eq $interface->{DESCRIPTION} } @addresses;
                 push @interfaces, @addresses;
                 undef @addresses;
             } elsif ($interface) {
@@ -706,9 +713,10 @@ sub getInterfacesFromIp {
             };
         }
     }
-    close $handle;
 
     if (@addresses) {
+        push @interfaces, $interface
+            if !any { $_->{DESCRIPTION} eq $interface->{DESCRIPTION} } @addresses;
         push @interfaces, @addresses;
         undef @addresses;
     } elsif ($interface) {
@@ -716,6 +724,34 @@ sub getInterfacesFromIp {
     }
 
     return @interfaces;
+}
+
+sub getDefaultGatewayFromIp {
+    my (%params) = (
+        command => '/sbin/ip -o route list default',
+        @_
+    );
+
+    my @lines = getAllLines(%params)
+        or return;
+
+    my ($gateway, $metric);
+
+    foreach (@lines) {
+        my ($info) = /^default\s+(.*)$/
+            or next;
+        my ($thisvia) = $info =~ /\bvia\s+(\S+)\b/
+            or next;
+        my ($thismetric) = $info =~ /\bmetric\s+(\d+)\b/;
+        # Only keep route with lower metric
+        if ($thismetric) {
+            next if $metric && int($thismetric) >= $metric;
+            $metric = int($thismetric);
+        }
+        $gateway = $thisvia;
+    }
+
+    return $gateway;
 }
 
 1;
@@ -845,5 +881,21 @@ Availables parameters:
 =item command the command to use (default: /sbin/ip addr show)
 
 =item file the file to use
+
+=back
+
+=head2 getDefaultGatewayFromIp(%params)
+
+Returns the default ip gateway, by parsing ip command output.
+
+Availables parameters:
+
+=over
+
+=item logger a logger object
+
+=item command the command to use (default: /sbin/ip -o route list default)
+
+=item file a file to use in place of command, can be used for tests
 
 =back

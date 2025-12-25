@@ -3,15 +3,16 @@
 # PERL: https://www.perl.org/get.html
 # SSL:  https://www.openssl.org/source/
 # ZLIB: https://www.zlib.net/
-: ${PERL_VERSION:=5.34.0}
-: ${OPENSSL_VERSION:=3.0.0}
-: ${ZLIB_VERSION:=1.2.11}
+: ${PERL_VERSION:=5.38.2}
+: ${OPENSSL_VERSION:=3.2.1}
+: ${ZLIB_VERSION:=1.3.1}
+: ${ZLIB_SHA256:=9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23}
 
 : ${BUILDER_NAME:="Guillaume Bougard (teclib)"}
 : ${BUILDER_MAIL:="gbougard_at_teclib.com"}
 
 : ${APPSIGNID:=}
-: ${INSTSINGID:=}
+: ${INSTSIGNID:=}
 : ${NOTARIZE:=no}
 
 let SIGNED=0
@@ -89,17 +90,16 @@ export MACOSX_DEPLOYMENT_TARGET
 
 BUILD_PREFIX="/Applications/GLPI-Agent"
 
-# We uses munkipkg script to simplify the process
-# Thanks to https://github.com/munki/munki-pkg project
+# We uses a modified munkipkg script to simplify the process
+# The modification targets notarytool support & distribution build
+# Get munkipkg from a modified version of https://github.com/munki/munki-pkg project's notarytool branch
 if [ ! -e munkipkg ]; then
-    echo "Downloading munkipkg script..."
-    curl -so munkipkg https://raw.githubusercontent.com/munki/munki-pkg/main/munkipkg
+    echo "Downloading modified munkipkg script..."
+    curl -so munkipkg https://raw.githubusercontent.com/g-bougard/munki-pkg/used-by-glpi-agent/munkipkg
     if [ ! -e munkipkg ]; then
         echo "Failed to download munkipkg script" >&2
         exit 3
     fi
-    # Use our patch to tune productbuild and notarization with other required parameters
-    [ -e munkipkg.patch ] && patch < munkipkg.patch
     chmod +x munkipkg
 fi
 
@@ -134,8 +134,15 @@ build_static_zlib () {
     cd "$ROOT"
     echo ======== Build zlib $ZLIB_VERSION
     ARCHIVE="zlib-$ZLIB_VERSION.tar.gz"
-    ZLIB_URL="http://www.zlib.net/$ARCHIVE"
+    ZLIB_URL="https://www.zlib.net/$ARCHIVE"
     [ -e "$ARCHIVE" ] || curl -so "$ARCHIVE" "$ZLIB_URL"
+    read SHA256 x <<<$( $SHASUM -a 256 $ARCHIVE )
+    if [ "$SHA256" == "$ZLIB_SHA256" ]; then
+        echo "Zlib $ZLIB_VERSION ready for building..."
+    else
+        echo "Can't build Zlib $ZLIB_VERSION, source archive sha256 digest mismatch"
+        exit 1
+    fi
     [ -d "zlib-$ZLIB_VERSION" ] || tar xzf "$ARCHIVE"
     [ -d "$ROOT/build/zlib" ] || mkdir -p "$ROOT/build/zlib"
     cd "$ROOT/build/zlib"
@@ -305,9 +312,9 @@ cpanm --notest -v --installdeps --no-man-pages $CPANM_OPTS .
 
 echo '===== Installing more perl module deps ====='
 cpanm --notest -v --no-man-pages  $CPANM_OPTS LWP::Protocol::https             \
-    HTTP::Daemon Proc::Daemon Archive::Extract File::Copy::Recursive JSON::PP  \
+    HTTP::Daemon Proc::Daemon Archive::Extract File::Copy::Recursive           \
     URI::Escape Net::Ping Parallel::ForkManager Net::SNMP Net::NBName DateTime \
-    Thread::Queue Parse::EDID YAML::Tiny Data::UUID
+    Thread::Queue Parse::EDID YAML::Tiny Data::UUID Cpanel::JSON::XS
 # Crypt::DES Crypt::Rijndael are commented as Crypt::DES fails to build on MacOSX
 # Net::Write::Layer2 depends on Net::PCAP but it fails on MacOSX
 
@@ -417,7 +424,7 @@ cat >pkg/build-info.plist <<-BUILD_INFO
 	    <key>distribution_style</key>
 	    <true/>
 	    <key>identifier</key>
-	    <string>org.glpi-project.glpi-agent</string>
+	    <string>com.teclib.glpi-agent</string>
 	    <key>install_location</key>
 	    <string>/</string>
 	    <key>name</key>
@@ -452,12 +459,14 @@ fi
 	    </dict>
 BUILD_INFO
 fi
-if [ -n "$NOTARIZE_USER" -a -n "$NOTARIZE_PASSWORD" -a "$NOTARIZE" == "yes" ]; then
+if [ -n "$NOTARIZE_USER" -a -n "$NOTARIZE_PASSWORD" -a -n "$NOTARIZE_TEAMID" -a "$NOTARIZE" == "yes" ]; then
     cat >>pkg/build-info.plist <<-BUILD_INFO
 	    <key>notarization_info</key>
 	    <dict>
-	        <key>username</key>
+	        <key>apple_id</key>
 	        <string>$NOTARIZE_USER</string>
+	        <key>team_id</key>
+	        <string>$NOTARIZE_TEAMID</string>
 	        <key>password</key>
 	        <string>$NOTARIZE_PASSWORD</string>
 	    </dict>
@@ -509,7 +518,7 @@ cat >pkg/Distribution.xml <<-CUSTOM
 	<?xml version="1.0" encoding="utf-8" standalone="no"?>
 	<installer-gui-script minSpecVersion="2">
 	    <title>GLPI-Agent $VERSION ($ARCH)</title>
-	    <pkg-ref id="org.glpi-project.glpi-agent" version="$VERSION" onConclusion="none">$PKG</pkg-ref>
+	    <pkg-ref id="com.teclib.glpi-agent" version="$VERSION" onConclusion="none">$PKG</pkg-ref>
 	    <license file="License.txt" mime-type="text/plain" />
 	    <background file="background.png" uti="public.png" alignment="bottomleft"/>
 	    <background-darkAqua file="background.png" uti="public.png" alignment="bottomleft"/>
@@ -517,16 +526,45 @@ cat >pkg/Distribution.xml <<-CUSTOM
 	    <options customize="never" require-scripts="false" hostArchitectures="$ARCH"/>
 	    <choices-outline>
 	        <line choice="default">
-	            <line choice="org.glpi-project.glpi-agent"/>
+	            <line choice="com.teclib.glpi-agent"/>
 	        </line>
 	    </choices-outline>
 	    <choice id="default"/>
-	    <choice id="org.glpi-project.glpi-agent" visible="false">
-	        <pkg-ref id="org.glpi-project.glpi-agent"/>
+	    <choice id="com.teclib.glpi-agent" visible="false">
+	        <pkg-ref id="com.teclib.glpi-agent"/>
 	    </choice>
 	    <os-version min="$MACOSX_DEPLOYMENT_TARGET" />
 	</installer-gui-script>
 CUSTOM
+
+echo "Prepare Info.plist..."
+[ -d pkg/payload/Applications/GLPI-Agent/Contents ] || mkdir -p pkg/payload/Applications/GLPI-Agent/Contents
+cat >pkg/payload/Applications/GLPI-Agent/Contents/Info.plist <<-INFO_PLIST
+	<?xml version="1.0" encoding="UTF-8"?>
+	<!DOCTYPE plist PUBLIC "-//Apple Computer//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+	<plist version="1.0">
+	<dict>
+	    <key>CFBundleShortVersionString</key>
+	    <string>$VERSION</string>
+	    <key>CFBundleVersion</key>
+	    <string>$VERSION</string>
+	    <key>NSHumanReadableCopyright</key>
+	    <string>Copyright 2023 GLPI-Project, GNU General Public License v2</string>
+	    <key>CFBundleDevelopmentRegion</key>
+	    <string>en</string>
+	    <key>CFBundleName</key>
+	    <string>GLPI-Agent</string>
+	    <key>CFBundleExecutable</key>
+	    <string>glpi-agent</string>
+	    <key>CFBundleIdentifier</key>
+	    <string>com.teclib.glpi-agent</string>
+	    <key>CFBundleInfoDictionaryVersion</key>
+	    <string>6.0</string>
+	    <key>CFBundlePackageType</key>
+	    <string>APPL</string>
+	</dict>
+	</plist>
+INFO_PLIST
 
 echo "Build package"
 ./munkipkg pkg
@@ -537,7 +575,7 @@ mv -vf "pkg/build/$PKG" "build/$PKG"
 [ -n "$INSTSIGNID" ] && pkgutil --check-signature "build/$PKG"
 
 # Notarization check
-[ -n "$NOTARIZE_USER" -a -n "$NOTARIZE_PASSWORD" -a "$NOTARIZE" == "yes" ] && xcrun stapler validate "build/$PKG"
+[ -n "$NOTARIZE_USER" -a -n "$NOTARIZE_PASSWORD" -a -n "$NOTARIZE_TEAMID" -a "$NOTARIZE" == "yes" ] && xcrun stapler validate "build/$PKG"
 
 rm -f "build/$DMG"
 echo "Create DMG"

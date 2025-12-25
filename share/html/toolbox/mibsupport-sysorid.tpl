@@ -1,9 +1,9 @@
     <p class='infos'>
-      <br/>{
+      <em class='hint'>{
   use URI::Escape;
   Text::Template::fill_in_file("$template_path/mibsupport-sysorid-infos.tpl", HASH => $hash)
-    || "Error loading mibsupport-rules-sysorid.tpl template: $Text::Template::ERROR"
-}      <br/>
+    || "Error loading mibsupport-rules-sysorid.tpl template: $Text::Template::ERROR"}
+      </em>
     </p>
     <table>
       <thead>
@@ -55,8 +55,8 @@
       </tbody>
     </table>
     <div class='select-row'>
-      <div class='arrow-left'></div>
-      <input class='submit-secondary' type='submit' name='submit/delete' value='{_"Delete"}'>
+      <i class='ti ti-corner-left-up arrow-left'></i>
+      <button class='secondary' type='submit' name='submit/delete' value='1' alt='{_"Delete"}'><i class='secondary ti ti-trash-filled'></i>{_"Delete"}</button>
       <div class='separation'></div>
       <label class='selection-option'>{_"Associated rules"}:</label>
       <select class='selection-option' name='input/rule'>
@@ -68,8 +68,8 @@
           " value='$_'>$_</option>"
         } @ordered_rules)}
       </select>
-      <input class='submit-secondary' type='submit' name='submit/add/rule' value='{_"Add rule"}'>
-      <input class='submit-secondary' type='submit' name='submit/del/rule' value='{_"Remove rule"}'>
+      <button class='secondary' type='submit' name='submit/add/rule' value='1' alt='{_"Add rule"}'><i class='secondary ti ti-playlist-add'></i>{_"Add rule"}</button>
+      <button class='secondary' type='submit' name='submit/del/rule' value='1' alt='{_"Remove rule"}'><i class='secondary ti ti-playlist-x'></i>{_"Remove rule"}</button>
     </div>
-     <hr/>
-    <input class='big-button' type='submit' name='submit/add/sysorid' value='{_"Add new MIB support"}'>
+    <hr/>
+    <button class='big-button' type='submit' name='submit/add/sysorid' value='1' alt='{_("Add new MIB support")}'><i class='primary ti ti-plus'></i>{_("Add new MIB support")}</button>

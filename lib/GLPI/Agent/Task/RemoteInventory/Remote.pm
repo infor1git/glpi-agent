@@ -11,9 +11,9 @@ use Socket qw(getaddrinfo getnameinfo);
 
 use GLPI::Agent::Tools::Network;
 
-my $supported_protocols = qr/^ssh|winrm$/;
-
 use constant    supported => 0;
+
+use constant    supported_modes => ();
 
 sub new {
     my ($class, %params) = @_;
@@ -25,6 +25,10 @@ sub new {
         _deviceid   => $dump->{deviceid}   // '',
         _url        => $dump->{url}        // $params{url},
         _config     => $params{config}     // {},
+        _user       => $ENV{USERNAME},
+        _pass       => $ENV{PASSWORD},
+        _modes      => {},
+        _timeout    => $params{timeout}    // 0,
         logger      => $params{logger},
     };
 
@@ -38,9 +42,6 @@ sub new {
         $url->host($self->{_url});
         $url->path('');
         $self->{_url} = $url->as_string;
-    } elsif ($scheme !~ $supported_protocols) {
-        $self->{logger}->error("Skipping '$self->{_url}' remote with unsupported '$scheme' protocol");
-        return $self;
     }
 
     my $subclass = ucfirst($scheme);
@@ -48,43 +49,59 @@ sub new {
     $class->require();
     if ($EVAL_ERROR) {
         $self->{logger}->debug("Failed to load $class module: $EVAL_ERROR");
-        $self->{logger}->error("Skipping '$self->{_url}' remote: class loading failure");
+        $self->{logger}->error("Skipping '$self->{_url}' remote: $EVAL_ERROR");
         return $self;
     }
 
-    # URI::winrm class is loaded with Remote::Winrm, so bless the URI object now
-    bless $url, "URI::winrm" if $scheme eq "winrm";
-
     $self->{_protocol} = $scheme;
-    $self->{_host} = $url->host;
-    my $userinfo = $url->userinfo;
-    if ($userinfo) {
-        my ($user, $pass) = split(/:/, $userinfo);
-        $self->{_user} = $user;
-        $self->{_pass} = $pass if defined($pass);
-    }
 
     # Check for mode, name & deviceid in url params
     my $query = $url->query() // '';
     my ($mode) = $query =~ /\bmode=(\w+)\b/;
-    $self->{_mode} = $mode if $mode;
-    my ($hostname) = $query =~ /\b(?:host)?name=(\w+)\b/;
-    $self->{_host} = $hostname if $hostname;
     unless ($self->{_deviceid}) {
         # Ignore deviceid params when provided by dump
-        my ($deviceid) = $query =~ /\bdeviceid=(\w+)\b/;
+        my ($deviceid) = $query =~ /\bdeviceid=([\w.-]+)\b/;
         $self->{_deviceid} = $deviceid if $deviceid;
     }
 
     bless $self, $class;
-    $self->init();
+
+    # Update supported modes
+    if ($mode) {
+        foreach my $key (split('_', lc($mode))) {
+            if (grep { $_ eq $key } $self->supported_modes()) {
+                $self->{_modes}->{$key} = 1;
+            } else {
+                $self->{logger}->debug("Unsupported remote mode: $key") if $self->{logger};
+            }
+        }
+        $self->{logger}->debug("Remote mode enabled: ".join(' ', keys(%{$self->{_modes}})))
+            if $self->{logger} && keys(%{$self->{_modes}});
+    }
+
+    $self->handle_url($url);
 
     return $self;
 }
 
-sub init {}
+sub handle_url {
+    my ($self, $url) = @_;
+
+    $self->{_host} = $url->host;
+    $self->{_port} = $url->port;
+    my $userinfo = $url->userinfo;
+    if ($userinfo) {
+        my ($user, $pass) = split(/:/, $userinfo);
+        $self->user($user);
+        $self->pass($pass) if defined($pass);
+    }
+}
+
+sub prepare {}
 
 sub checking_error {}
+
+sub disconnect {}
 
 sub host {
     my ($self, $hostname) = @_;
@@ -94,18 +111,55 @@ sub host {
     return $self->{_host} // '';
 }
 
+sub port {
+    my ($self, $port) = @_;
+
+    $self->{_port} = $port if $port;
+
+    return $self->{_port} // 0;
+}
+
+sub user {
+    my ($self, $user) = @_;
+
+    $self->{_user} = $user if defined($user);
+
+    return $self->{_user} // '';
+}
+
+sub pass {
+    my ($self, $pass) = @_;
+
+    $self->{_pass} = $pass if defined($pass);
+
+    return $self->{_pass} // '';
+}
+
 sub mode {
     my ($self, $mode) = @_;
 
-    return $self->{_mode} && $self->{_mode} eq $mode
-        if $mode;
+    return $self->{_modes}->{$mode} if defined($mode);
 
-    return $self->{_mode} // '';
+    return $self->{_modes};
 }
 
-sub resetmode {
-    my ($self) = @_;
-    delete $self->{_mode};
+sub worker {
+    my ($self, $worker) = @_;
+
+    return $self->{_worker} = $worker if $worker;
+
+    return $self->{_worker} // 0;
+}
+
+sub retry {
+    my ($self, $delay) = @_;
+
+    if (defined($delay)) {
+        $self->{_retry} = $delay;
+        $self->expiration(time+$delay) if $delay;
+    }
+
+    return $self->{_retry} ? $self : 0;
 }
 
 sub deviceid {
@@ -120,7 +174,7 @@ sub deviceid {
         my $hostname = $params{hostname} || $self->host();
         if ($hostname =~ $ip_address_pattern) {
             my $info = getaddrinfo($hostname);
-            if ($info && $info->{addr}) {
+            if (ref($info) && $info->{addr}) {
                 my ($err, $name) = getnameinfo($info->{addr});
                 $hostname = $name if $name;
             }
@@ -149,6 +203,14 @@ sub protocol {
     return $self->{_protocol};
 }
 
+sub timeout {
+    my ($self, $timeout) = @_;
+
+    $self->{_timeout} = $timeout if defined($timeout);
+
+    return $self->{_timeout} || $self->config->{"backend-collect-timeout"} // 60;
+}
+
 sub expiration {
     my ($self, $timeout) = @_;
 
@@ -170,9 +232,6 @@ sub dump {
         expiration  => $self->{_expiration},
     };
 
-    # Keep any specific variable
-    map { $dump->{$_} = $self->{$_} } @{$self->{_keep_in_dump}};
-
     return $dump;
 }
 
@@ -187,11 +246,13 @@ sub safe_url {
 
     return $self->{_url} if $self->config && $self->config->{'show-passwords'};
 
-    my $url = URI->new($self->{_url});
-    return $self->{_url} unless $url->userinfo;
-    my ($user) = split(/:/, $url->userinfo);
-    $url->userinfo("$user:****");
-    return $url->as_string;
+    my $pass = $self->pass();
+    return $self->{_url} unless length($pass);
+
+    my $url = $self->{_url};
+    $url =~ s/:$pass/:****/;
+
+    return $url;
 }
 
 sub getRemoteFirstLine {

@@ -5,14 +5,13 @@ use warnings;
 
 use parent 'GLPI::Agent::Task::Inventory::Module';
 
-use Sys::Hostname;
-
 use GLPI::Agent::Tools;
+use GLPI::Agent::Tools::Hostname;
 
 use constant    category    => "hardware";
 
 sub isEnabled {
-    return has_file("/etc/resolv.conf");
+    return canRead("/etc/resolv.conf");
 }
 
 sub doInventory {
@@ -21,16 +20,18 @@ sub doInventory {
     my $inventory = $params{inventory};
     my $logger    = $params{logger};
 
+    my $infos;
+
     # first, parse /etc/resolv.conf for the DNS servers,
     # and the domain search list
-    my %dns_list;
     my %search_list;
-    my $handle = getFileHandle(
+    my @lines = getAllLines(
         file => '/etc/resolv.conf',
         logger => $logger
     );
-    if ($handle) {
-        while (my $line = <$handle>) {
+    if (@lines) {
+        my %dns_list;
+        foreach my $line (@lines) {
             if (my ($dns) = $line =~ /^nameserver\s+(\S+)/) {
                 $dns =~ s/\.+$//;
                 $dns_list{$dns} = 1;
@@ -39,29 +40,24 @@ sub doInventory {
                 $search_list{$domain} = 1;
             }
         }
-        close $handle;
+        $infos->{DNS} = join('/', sort keys %dns_list)
+            if keys(%dns_list);
     }
-
-    my $dns = join('/', sort keys %dns_list);
 
     # attempt to deduce the actual domain from the host name
     # and fallback on the domain search list
-    my $domain;
-    my $hostname = hostname();
+    my $hostname = getHostname(fqdn => 1);
     my $pos = index $hostname, '.';
 
-    if ($pos >= 0) {
-        $domain = substr($hostname, $pos + 1);
-        $domain =~ s/\.+$//;
-    } else {
-        $domain = join('/', sort keys %search_list);
+    if ($pos > 0) {
+        $hostname =~ s/\.+$//;
+        $infos->{WORKGROUP} = substr($hostname, $pos + 1) if $pos < length($hostname);
     }
 
-    $inventory->setHardware({
-        WORKGROUP => $domain,
-        DNS       => $dns
-    });
+    $infos->{WORKGROUP} = join('/', sort keys %search_list)
+        if !$infos->{WORKGROUP} && keys(%search_list);
 
+    $inventory->setHardware($infos) if $infos;
 }
 
 1;

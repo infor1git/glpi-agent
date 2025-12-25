@@ -15,6 +15,7 @@ use GLPI::Agent::Task::Deploy::ActionProcessor;
 use GLPI::Agent::Task::Deploy::Datastore;
 use GLPI::Agent::Task::Deploy::File;
 use GLPI::Agent::Task::Deploy::Job;
+use GLPI::Agent::Event;
 
 use GLPI::Agent::Task::Deploy::Version;
 
@@ -92,10 +93,10 @@ sub processRemote {
     my $folder = $self->{target}->getStorage()->getDirectory();
     my $datastore = GLPI::Agent::Task::Deploy::Datastore->new(
         config => $self->{config},
-        path   => $folder.'/deploy',
+        path   => $folder,
         logger => $logger
     );
-    $datastore->cleanUp( force => $datastore->diskIsFull() );
+    $datastore->cleanUp();
 
     my $jobList = [];
     my $files;
@@ -294,11 +295,15 @@ sub processRemote {
         $logger->debug2("Processing for job $job->{uuid}...");
 
         # PROCESSING
-        my $actionProcessor =
-          GLPI::Agent::Task::Deploy::ActionProcessor->new(
-            workdir => $workdir
+        my $actionProcessor = GLPI::Agent::Task::Deploy::ActionProcessor->new(
+            logger  => $logger,
+            workdir => $workdir->path()
         );
         my $actionnum = 0;
+
+        # Essentially to change dir to workdir
+        $actionProcessor->starting();
+
         while ( my $action = $job->getNextToProcess() ) {
             my ($actionName, $params) = %$action;
             if ( $params && (ref( $params->{checks} ) eq 'ARRAY') ) {
@@ -316,8 +321,10 @@ sub processRemote {
             $job->currentStep('processing');
 
             my $ret;
-            eval { $ret = $actionProcessor->process($actionName, $params, $logger); };
-            $ret->{msg} = [] unless $ret->{msg};
+            eval {
+                $ret = $actionProcessor->process($actionName, $params);
+            };
+            $ret->{msg} = [] unless $ret && $ret->{msg};
             push @{$ret->{msg}}, $@ if $@;
 
             my $name = $params->{name} || "action #".($actionnum+1);
@@ -352,7 +359,9 @@ sub processRemote {
                     msg       => "$name, processing failure"
                 );
 
-                next JOB;
+                # Mark processing as failed and leave loop
+                $actionProcessor->failure();
+                last;
             }
             $job->setStatus(
                 status    => 'ok',
@@ -362,6 +371,12 @@ sub processRemote {
 
             $actionnum++;
         }
+
+        # Essentially to change dir back from workdir
+        $actionProcessor->done();
+
+        # Handle next job if action processor failed
+        next if $actionProcessor->failed();
 
         # USER INTERACTION
         $job->next_on_usercheck(type => 'after');
@@ -389,7 +404,7 @@ sub processRemote {
 }
 
 sub run {
-    my ($self, %params) = @_;
+    my ($self) = @_;
 
     # Turn off localised output for commands
     $ENV{LC_ALL} = 'C'; # Turn off localised output for commands
@@ -399,41 +414,35 @@ sub run {
 
     my $event = $self->event;
     if ($event) {
-        if ($event->{maintenance} && GLPI::Agent::Task::Deploy::Maintenance->require()) {
-            $logger->debug("Deploy task $event->{name} event for ".$self->{target}->id(). " target");
+        my $name = $event->name;
+        if ($name && $event->maintenance && GLPI::Agent::Task::Deploy::Maintenance->require()) {
+            my $nextEvent;
+            my $targetid = $self->{target}->id;
+            $logger->debug("Deploy task $name event for $targetid target");
             my $maintenance = GLPI::Agent::Task::Deploy::Maintenance->new(
                 target  => $self->{target},
                 config  => $self->{config},
                 logger  => $self->{logger},
             );
             if ($maintenance->doMaintenance()) {
-                $event = $self->newEvent();
-                $logger->debug("Planning another $event->{name} event for ".$self->{target}->id(). " target in $event->{delay}s");
+                $nextEvent = $self->newEvent();
+                $logger->debug("Planning another $name event for $targetid target in ".$event->delay()."s");
             } else {
                 # Don't restart event if datastore has been fully cleaned up
-                $logger->debug("No need to plan another $event->{name} event for ".$self->{target}->id(). " target");
-                undef $event;
+                $logger->debug("No need to plan another $name event for $targetid target");
             }
-            $self->resetEvent($event);
+            $self->resetEvent($nextEvent);
         }
         return;
     }
 
     $self->{client} = GLPI::Agent::HTTP::Client::Fusion->new(
-        logger       => $logger,
-        user         => $params{user},
-        password     => $params{password},
-        proxy        => $params{proxy},
-        ca_cert_file => $params{ca_cert_file},
-        ca_cert_dir  => $params{ca_cert_dir},
-        no_ssl_check => $params{no_ssl_check},
-        ssl_cert_file => $params{ssl_cert_file},
-        debug        => $self->{debug}
+        logger  => $logger,
+        config  => $self->{config},
     );
 
-    my $url = $self->{target}->getUrl();
     my $globalRemoteConfig = $self->{client}->send(
-        url  => $url,
+        url  => $self->{target}->getUrl(),
         args => {
             action    => "getConfig",
             machineid => $self->{deviceid},
@@ -441,12 +450,17 @@ sub run {
         }
     );
 
+    my $id = $self->{target}->id();
+    if (!$globalRemoteConfig) {
+        $self->{logger}->info("Deploy task not supported by $id");
+        return;
+    }
     if (!$globalRemoteConfig->{schedule}) {
-        $logger->info("No job schedule returned from server at $url");
+        $logger->info("No job schedule returned by $id");
         return;
     }
     if (ref( $globalRemoteConfig->{schedule} ) ne 'ARRAY') {
-        $logger->info("Malformed schedule from server at $url");
+        $logger->info("Malformed schedule returned by $id");
         return;
     }
     if ( !@{$globalRemoteConfig->{schedule}} ) {
@@ -474,13 +488,13 @@ sub run {
 sub newEvent {
     my ($self) = @_;
 
-    return {
+    return GLPI::Agent::Event->new(
         name        => "storage maintenance",
         task        => "deploy",
         maintenance => "yes",
         target      => $self->{target}->id(),
         delay       => 120,
-    };
+    );
 }
 
 1;
@@ -511,6 +525,6 @@ Returns true if the task is enabled.
 
 Process orders from a remote server.
 
-=head2 run ( $self, %params )
+=head2 run ( $self )
 
 Run the task.

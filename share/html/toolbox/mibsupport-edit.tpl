@@ -7,6 +7,6 @@
         my $tpl = "mibsupport-".$form{currenttab}."-edit.tpl";
         $OUT .= Text::Template::fill_in_file("$template_path/$tpl", HASH => $hash)
           || "Error loading $tpl template: $Text::Template::ERROR";
-      }
-}    <input type='submit' class='big-button' name='submit/cancel' value='{_("Cancel")}'>
+      }}
+    <button type='submit' class='big-button secondary-button' name='submit/back-to-list' formnovalidate='1' value='1' alt='{_("Go back to list")}'><i class='primary ti ti-list'></i>{_("Go back to list")}</button>
   </form>

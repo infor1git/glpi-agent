@@ -12,7 +12,19 @@ use GLPI::Agent::Tools;
 
 sub isEnabled {
     # Snap is not supported on AIX and the command has another usage
-    return OSNAME ne 'aix' && canRun('snap');
+    return 0 unless OSNAME ne 'aix' && canRun('snap');
+
+    # Try to check if snapd is active/running
+    if (canRun('pgrep')) {
+        if (canRun('systemcl') && getFirstLine(command => "pgrep -g 1 -x systemd")) {
+            my $status = getFirstLine(command => "systemctl is-active snapd");
+            return 0 if defined($status) && $status =~ /inactive/;
+        } elsif (!getFirstLine(command => "pgrep -x snapd")) {
+            return 0;
+        }
+    }
+
+    return 1;
 }
 
 sub doInventory {
@@ -20,6 +32,14 @@ sub doInventory {
 
     my $inventory = $params{inventory};
     my $logger    = $params{logger};
+
+    # Don't try to contact snapd if said not available by "snap version"
+    my $snapd = getFirstMatch(
+        logger  => $logger,
+        command => 'snap version',
+        pattern => qr/^snapd\s+(\S+)$/,
+    );
+    return if $snapd && $snapd eq 'unavailable';
 
     my $packages = _getPackagesList(
         logger  => $logger,
@@ -45,12 +65,11 @@ sub doInventory {
 sub _getPackagesList {
     my (%params) = @_;
 
-    my $handle = getFileHandle(%params);
-    return unless $handle;
+    my @lines = getAllLines(%params)
+        or return;
 
     my @packages;
-    while (my $line = <$handle>) {
-        chomp $line;
+    foreach my $line (@lines) {
         my @infos = split(/\s+/, $line)
             or next;
 
@@ -80,7 +99,6 @@ sub _getPackagesList {
 
         push @packages, $snap;
     }
-    close $handle;
 
     return \@packages;
 }

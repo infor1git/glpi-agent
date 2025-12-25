@@ -7,6 +7,7 @@ use English qw(-no_match_vars);
 
 use GLPI::Agent::Logger;
 use GLPI::Agent::Storage;
+use GLPI::Agent::Event;
 
 my $errMaxDelay = 0;
 
@@ -44,24 +45,38 @@ sub _init {
     # target identity
     $self->{id} = $params{id};
 
+    # Initialize logger prefix
+    $self->{_logprefix} = "[target $self->{id}]";
+
     $self->{storage} = GLPI::Agent::Storage->new(
         logger    => $self->{logger},
         directory => $params{vardir}
     );
 
+    my $keepMaxDelay = $self->getMaxDelay();
+
     # handle persistent state
     $self->_loadState();
 
-    $self->{nextRunDate} = $self->_computeNextRunDate()
+    # Update maxDelay from provided config when not a server
+    unless ($self->isType('server')) {
+        $self->setMaxDelay($keepMaxDelay);
+    }
+
+    $self->{nextRunDate} = $self->computeNextRunDate()
         if (!$self->{nextRunDate} || $self->{nextRunDate} < time-$self->getMaxDelay());
 
     $self->_saveState();
 
     $logger->debug(
-        "[target $self->{id}] Next server contact planned for " .
-        localtime($self->{nextRunDate})
+        "$self->{_logprefix} Next " .
+        ($self->isType("server") ? "server contact" : "tasks run") .
+        " planned " .
+        ($self->{nextRunDate} < time ? "now" : "for ".localtime($self->{nextRunDate}))
     );
 
+    # Disable initialDelay if next run date has still been set in a previous run to a later time
+    delete $self->{initialDelay} if $self->{initialDelay} && $self->{nextRunDate} && $self->{nextRunDate} > time;
 }
 
 sub id {
@@ -113,7 +128,7 @@ sub resetNextRunDate {
     return if delete $self->{_expiration};
 
     $self->{_nextrundelay} = 0;
-    $self->{nextRunDate} = $self->_computeNextRunDate();
+    $self->{nextRunDate} = $self->computeNextRunDate();
     $self->_saveState();
 }
 
@@ -132,86 +147,113 @@ sub triggerTaskInitEvents {
     return unless $self->{tasks} && @{$self->{tasks}};
 
     foreach my $task (@{$self->{tasks}}) {
-        push @{$self->{_events}}, {
-            name    => "init",
+        push @{$self->{_events}}, GLPI::Agent::Event->new(
             task    => $task,
             init    => "yes",
             rundate => time+10,
-        };
+        );
     }
 }
 
 sub addEvent {
     my ($self, $event) = @_;
 
+    # event name is mandatory
+    return unless $event->name;
+
     my $logger = $self->{logger};
+    my $logprefix = $self->{_logprefix};
 
     # Check for supported events
-    my $partial = delete $event->{partial};
-    if ($partial && $partial =~ /^yes|1$/i && defined($event->{category})) {
-        unless ($event->{category}) {
-            $logger->debug("[target $self->{id}] Not supported partial inventory request without selected category");
+    if ($event->partial) {
+        unless ($event->category) {
+            $logger->debug("$logprefix Not supported partial inventory request without selected category");
             return 0;
         }
-        # Partial inventory request on given categories
-        $event->{partial} = 1;
-        $event->{task}    = "inventory";
-        $event->{name}    = "partial inventory";
-        $logger->debug("[target $self->{id}] Partial inventory event on category: $event->{category}");
+        $logger->debug("$logprefix Partial inventory event on category: ".$event->category);
         # Remove any existing partial inventory event
-        $self->{_events} = [ grep { ! $_->{partial} } @{$self->{_events}} ]
+        $self->{_events} = [ grep { ! $_->partial } @{$self->{_events}} ]
             if $self->{_events} && @{$self->{_events}};
-    } elsif ($event->{maintenance} && $event->{maintenance} =~ /^yes|1$/i) {
-        my $debug = "[target $self->{id}] New $event->{name} event on $event->{task} task";
-        my $count = 0;
-        $count = @{$self->{_events}} if $self->{_events};
-        if ($count) {
+    } elsif ($event->maintenance) {
+        unless ($event->task) {
+            $logger->debug("$logprefix Not supported maintenance request without selected task");
+            return 0;
+        }
+        my $debug = "New";
+        if ($self->{_events}) {
+            my $count = @{$self->{_events}};
             # Remove any existing maintenance event for the same target
             $self->{_events} = [
                 grep {
-                    ! $_->{maintenance} || $_->{task} ne $event->{task} || $_->{target} ne $event->{target}
+                    ! $_->maintenance || $_->task ne $event->task || $_->target ne $event->target
                 } @{$self->{_events}}
             ];
-            $debug = "[target $self->{id}] Replacing $event->{name} event on $event->{task} task"
-                if @{$self->{_events}} < $count;
+            $debug = "Replacing" if @{$self->{_events}} < $count;
         }
-        $logger->debug($debug);
+        $logger->debug(sprintf("%s %s %s event on %s task", $logprefix, $debug, $event->name, $event->task));
+    } elsif ($event->job) {
+        my $rundate = $event->rundate;
+        if ($rundate) {
+            $logger->debug(sprintf("%s Adding %s job event as %s task scheduled on %s", $logprefix, $event->name, $event->task, scalar(localtime($rundate))));
+        } else {
+            $logger->debug(sprintf("%s Adding %s job event as %s task", $logprefix, $event->name, $event->task));
+        }
     } else {
-        $logger->debug("[target $self->{id}] Not supported event request: ".join("-",keys(%{$event})));
+        $logger->debug("$logprefix Not supported event request: ".$event->dump_as_string());
         return 0;
     }
 
-    if (@{$self->{_events}}>20) {
-        $logger->debug("[target $self->{id}] Event requests overflow, skipping new event");
+    if (@{$self->{_events}} >= 1024) {
+        $logger->debug("$logprefix Event requests overflow, skipping new event");
         return 0;
     } elsif ($self->{_next_event}) {
-        my $nexttime = $self->{_next_event}->{$event->{name}};
+        my $nexttime = $self->{_next_event}->{$event->name};
         if ($nexttime && time < $nexttime) {
-            $logger->debug("[target $self->{id}] Skipping too early new $event->{name} event");
+            $logger->debug("$logprefix Skipping too early new ".$event->name()." event");
             return 0;
         }
         # Do not accept the same event in less than 15 seconds
-        $self->{_next_event}->{$event->{name}} = time + 15;
+        $self->{_next_event}->{$event->name} = time + 15;
     }
 
-    my $delay = delete $event->{delay} // 0;
-    $event->{rundate} = time + $delay;
-    $logger->debug2("[target $self->{id}] Event scheduled in $delay seconds") if $delay;
+    # Job should still have rundate set
+    unless ($event->job) {
+        my $delay = $event->delay() // 0;
+        $event->rundate(time + $delay);
+        $logger->debug2("$logprefix Event scheduled in $delay seconds") if $delay;
+    }
 
-    if ($self->{_events} && !@{$self->{_events}}) {
+    if (!$self->{_events} || !@{$self->{_events}} || $event->rundate > $self->{_events}->[-1]->rundate) {
         push @{$self->{_events}}, $event;
     } else {
         $self->{_events} = [
-            sort { $a->{rundate} <=> $b->{rundate} } @{$self->{_events}}, $event
+            sort { $a->rundate <=> $b->rundate } @{$self->{_events}}, $event
         ];
     }
 
     return $event;
 }
 
+sub delEvent {
+    my ($self, $event) = @_;
+
+    return unless $event->name;
+
+    # Always accept new event for this name
+    delete $self->{_next_event}->{$event->name}
+        if $self->{_next_event};
+
+    # Cleanup event list
+    $self->{_events} = [ grep { $_->name ne $event->name } @{$self->{_events}} ]
+}
+
 sub getEvent {
-    my ($self) = @_;
-    return unless @{$self->{_events}} && time >= $self->{_events}->[0]->{rundate};
+    my ($self, $name) = @_;
+    if ($name) {
+        my ($event) = grep { $_->name eq $name } @{$self->{_events}};
+        return $event;
+    }
+    return unless @{$self->{_events}} && time >= $self->{_events}->[0]->rundate;
     return shift @{$self->{_events}};
 }
 
@@ -270,7 +312,7 @@ sub isGlpiServer {
 
 # compute a run date, as current date and a random delay
 # between maxDelay / 2 and maxDelay
-sub _computeNextRunDate {
+sub computeNextRunDate {
     my ($self) = @_;
 
     my $ret;
@@ -298,14 +340,12 @@ sub _loadState {
 
     my $data = $self->{storage}->restore(name => 'target');
 
-    $self->{maxDelay}    = $data->{maxDelay}    if $data->{maxDelay};
-    $self->{nextRunDate} = $data->{nextRunDate} if $data->{nextRunDate};
+    map { $self->{$_} = $data->{$_} } grep { defined($data->{$_}) } qw/
+        maxDelay nextRunDate id
+    /;
 
     # Update us as GLPI server is recognized as so before
     $self->isGlpiServer(1) if $data->{is_glpi_server};
-
-    # Disable initialDelay if next run date has still been set in a previous run
-    delete $self->{initialDelay} if $data->{nextRunDate};
 }
 
 sub _saveState {
@@ -314,10 +354,20 @@ sub _saveState {
     my $data ={
         maxDelay    => $self->{maxDelay},
         nextRunDate => $self->{nextRunDate},
+        type        => $self->getType(),                 # needed by glpi-remote
+        id          => $self->id(),                      # needed by glpi-remote
     };
 
-    # Add a flag if we are a GLPI server target
-    $data->{is_glpi_server} = 1 if $self->isGlpiServer();
+    if ($self->isType('server')) {
+        # Add a flag if we are a GLPI server target
+        $data->{is_glpi_server} = 1 if $self->isGlpiServer();
+        my $url = $self->getUrl();
+        if (ref($url) =~ /^URI/) {
+            $data->{url} = $url->as_string;              # needed by glpi-remote
+        }
+    } elsif ($self->isType('local')) {
+        $data->{path} = $self->getPath();                # needed by glpi-remote
+    }
 
     $self->{storage}->save(
         name => 'target',

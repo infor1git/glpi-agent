@@ -1,18 +1,641 @@
 Revision history for GLPI agent
 
-1.1 not released yet
+1.7.3 Wed, 03 Apr 2024
+
+packaging:
+* Fix LOCAL was set to installation folder during windows MSI installation v1.7.2,
+  even if LOCAL was not used or it was set empty in installer UI
+* Enhanced CVE-2024-28241 fix to only apply folder security if install folder and
+  eventually LOCAL folder are subfolders of system "Program Files" folder
+* Fix MSI to reuse InstallDir set in registry on upgrade
+
+1.7.2 Mon, 25 Mar 2024
+
+packaging:
+* [SECURITY] Fix CVE-2024-28241: A local user could modify the GLPI-Agent installation
+  to gain higher privileges, but only on windows with MSI packaging when GLPI Agent
+  is not installed in the default installation folder
+* [SECURITY] Fix CVE-2024-28240: A local user could modify the GLPI Agent configuration
+  to gain higher privileges if installed on windows with MSI packaging
+* Update MacOSX to use perl 5.38.2, OpenSSL 3.2.1 and zlib 1.3.1
+
+1.7.1 Fri, 22 Dec 2023
+
+core:
+* fix #567: Test ssl-fingerprint option as an empty array to still try to export
+  windows keystore or macosx keychain for SSL certificate validation checks
+  This fixes SSL connection issues appeared with 1.7 release on windows & macosx.
+
+1.7 Thu, 21 Dec 2023
+
+core:
+* Make alt2canonical() always return a mac address in lower case if found one
+* Fix HTTP::Client API to support timeout update
+* Move runPowerShell() API remote case support in RemoteInventory API
+* Update httpd default page to show targets id and server url or local path only
+  for trusted clients
+* Update local target API to support getFullPath() & setFullPath() calls
+* Handle '.' local target when run as a service to save inventories in vardir
+* Reduce internal IPC event supported size
+* To optimize IPC support, read all event messages before triggering events
+* fix #560: Skip export of keystore on win32 or keychain on MacOSX if any one of
+  ca-cert-file, ca-cert-dir or ssl-fingerprint options is used
 
 inventory:
-* Fix: Make deprecated XML format compatible with GLPI 10 XML to JSON converter
+* PR #531: Add SentinelOne Antivirus support on Linux, thanks to @MarcSamD
+* Feature: Update support assetname-support as option for agent on most unix
+  if 1 (the default), the short hostname is used as asset name
+  if 2, the as-is hostname (can be fqdn) is used as asset name
+  if 3, the fqdn hostname is used as asset name
+  this feature does not apply on MacOS or Windows
+  this feature now works for remote ssh and for option 3, it requires perl installed
+  on targeted computer and perl mode enabled on defined remote.
+* Feature: Make assetname-support option also works to compute agent deviceid when
+  unknown
+* Fix video card memory inventory on win32
+* fix #554: Network inventory may be missing on linux with faulty default route parsing
+* Add network speed discovery for wireless network devices on linux
+* Fix rpm software summary encoding for rpm-based software inventory
+* Bump Inventory task version to 1.15
 
-collect:
-* we now support GLPI 10 server if glpi-inventory plugin is used on server-side
+remoteinventory:
+* Fix connection timeout API to support timeout update 
+* Update win32 fqdn inventory
+* Add timezone inventory support
+* Fix OS FQDN and domain for ssh remote inventory
+* Add printers inventory support for ssh remote inventory with perl mode
+* Fix error preventing software inventory of windows remote from a win32 agent
+* Fix typo in ConnectTimeout option use with ssh command mode
+* Add '--stricthostkeychecking' option to glpi-remote, supported values are the same
+  than StrictHostKeyChecking ssh option (see ssh_config man page), default to 'accept-new'.
+* Bump RemoteInventory task version to 1.4
 
-deploy:
-* we now support GLPI 10 server if glpi-inventory plugin is used on server-side
+netdiscovery/netinventory:
+* Enhanced Toshiba printers support
+* Fix LLDP support
+* Update timeout to backend-collect-timeout configuration when scanning ESX or
+  RemoteInventory after a successful scan requested by ToolBox
+* Fix possible concurrency error leading to an unrecoverable blocked task
+* Use new local target API to set expected saving folder
+* Bump NetDiscovery task version to 6.1
+* Bump NetInventory task version to 6.1
+* Updated sysobject.ids
 
 esx:
-* we now support GLPI 10 server if glpi-inventory plugin is used on server-side
+* Fix first connection timeout support
+* Added --timeout option support to glpi-esx
+* Fix wrong 'n/a' ko status report to tasks managed by GLPI Inventory plugin
+* Bump ESX task version to 2.10
+
+toolbox:
+* fix #533: Fix Toolbox export buttons in inventory results
+* Fix wrong remote inventory results when using a short timeout for quickier detection
+* Handle agent folder as vardir folder when agent is running as a service
+* Fix netscan task fails to submit remote inventories with JSON protocol
+* Fix locking on logger IPC events when running netscan for server target on win32
+* Bump ToolBox plugin version to 1.3
+
+injector:
+* fix #537: Make -x, --xml-ua & --json-ua options equivalent and update help text
+
+packaging:
+* Update MacOSX packages to use OpenSSL 3.2.0
+* Update MacOSX packaging to use "com.teclib.glpi-agent" as AppID and service identifier
+* Fix linux installer typo preventing configuration update when required
+
+1.6.1 Fri, 17 Nov 2023
+
+core:
+* fix #530: Also include Mozilla::CA default store when including windows keystore
+  or macosx keychains certificates as IO::Socket::SSL can't no more use them since
+  LWP::Protocol::https update.
+  This fixes SSL connection issues appeared with 1.6 release.
+
+1.6 Wed, 15 Nov 2023
+
+core:
+* Rework of agent events support
+* Add support for tasks cache & tasks events
+* Support forbid_not_trusted option for all httpd server plugins. The option is set to "no"
+  by default to keep compatibility with older configurations. If set to "yes", only trusted
+  ips will be authorized to access related httpd plugin features.
+* fix #434: Fix XML encoding when sent by OCS client code, thanks to Nikolay Chizhov (@nchizhov)
+* fix #438: Fix forking when required on win32 for Proxy & ToolBox plugins, and so
+  this fixes IPC support on win32
+* fix #438: Also load XML::LibXML as late as possible to avoid multi-threading issues on win32
+* Make http server supports CORS protocol for /now requests
+* Update getCanonicalSize() to recognize kibibyte, mebibyte, gibibyte, tebibyte
+  pebibyte and exbibyte units
+* Always report first found route in unix getRoutingTable() API
+* fix: Update GLPI::Agent::XML class to make calls in a dedicated thread on win32
+
+inventory:
+* Fix inventory failure due to Oracle database inventory on win32
+* Fix AMD Epyc CPU inventory on win32
+* fix #447, #464: Support Cgroup 2 resource limits on LXC containers inventory
+* Fix local inventory when html format is requested as output format
+* fix #430: Enhanced monitor support on MacOS Ventura with M1 CPU
+* fix #449: Don't override storage size with null value reported by hdparm on win32
+* Report storage size detected by WMI in Mib in place of Mb on win32
+* Update RustDesk remote_mgmt support starting from RustDesk v1.2.2
+* Fix Microsoft Defender Antivirus support on MacOSX
+* fix #458: Add Microsoft Defender Antivirus support on Linux, thanks to @j-ldes
+* Refactoring & enhanced Aix bios inventory to use lsconf as fallback
+* PR #472: Add BitDefender Antivirus support on Linux, thanks to @ticgal
+* fix #479: Fix monitor inventory when PNPDeviceID contains an underscore on win32
+* fix #476: Support to retrieve last logged user UPN from authentication cache on win32
+  to ease computers ans users linking in GLPI when using Azure AD
+* fix #488: Fix memory & cpu supports for LXD virtualization
+* fix #494: Fix video card memory size may be wrongly reported on win32
+* Update manufacturer support for linux storages
+* fix #511: First try to use ip route to find default gateway on linux
+  Also fix default gateway suppport on most unix
+* Fix no more available local users inventory since 1.5 on win32
+* fix #519: Fix inventory of usb bar code scanner from Symbol Technologies
+  On linux, skip wrong serialnumbers like "0000" on usb hubs
+* Fix USB devices inventory on linux
+* Support json format normalization based on regexp to remove unsupported virtualmachine status
+* fix #463: Support lxc containers in Proxmox cluster
+* Updated pci.ids to 2023.11.11 version
+* Updated usb.ids to 2023.11.08 version
+* Bump Inventory task version to 1.14
+
+remoteinventory:
+* Fix ssh connection issue
+* Support connection timeout option
+* Bump RemoteInventory task version to 1.3
+
+netdiscovery/netinventory:
+* Enhanced Aruba IAP models support
+* Enhanced CheckPoint devices support
+* Enhanced Cisco devices support
+* Enhanced Citrix devices support
+* Enhanced Zebra printers support
+* PR #500: Enhanced Synology NAS support with drives & storages support
+* Use Parallel::ForkManager for netdiscovery & netinventory tasks
+* Preload mibsupport as optimization
+* Add ESX & RemoteInventory scanning support to netdiscovery
+* fix #327: Make task expiration a function of backend-collect-timeout configuration
+  Add backend-collect-timeout support to glpi-netdiscovery & glpi-netinventory scripts
+* fix #521: Keep compatibility with older platforms when using Parallel::ForkManager
+* Updated sysobject.ids
+* Bump NetDiscovery task version to 6.0
+* Bump NetInventory task version to 6.0
+
+esx:
+* Refactoring to share more code between task & glpi-esx script and to support netscan
+* Added --debug option support to glpi-esx
+* Support timeout as netscan option or use backend-collect-timeout as timeout
+* fixed & updated unittests
+* Bump ESX task version to 2.9
+
+proxy-server-plugin:
+* fix #461: Fix XML content-type support for inventories sent by android agent
+* Store json inventories with right name where locally storing inventories
+* Fixed compressed content support
+* Bump Proxy plugin version to 2.3
+
+injector:
+* Support --ssl-cert-file option to permit SSL client authentication
+
+toolbox:
+* Feature: Inventory is now a list of local inventory or netscan task job
+* Feature: Support task job scheduling management in a dedicated page
+* Feature: Support ESX & RemoteInventory as credentials type
+* Feature: Support ESX & RemoteInventory credentials in IP range
+* Feature: Inventory netscan job can be started to discover and inventory ESX or
+  RemoteInventory computers
+* fix #254: Add credential to iprange not working after adding first one
+* Use tabler-icons v 2.24.0
+* Store discovered snmp credentials and ip_range in dedicated storage in place of netdisco XML
+* fix #255: Add ToolBox url on agent index page and support enabling agent home
+  link in navigation bar
+* Bump ToolBox plugin version to 1.2
+
+packaging:
+* Update MacOSX packages to use OpenSSL 3.1.4 & zlib 1.3
+* Install basic-authentication-server-plugin.cfg plugin default configuration on debian
+* fix #446: Always add Sys::Hostname dependency to rpm packaging
+* fix #493: Add support for CONFIG=reset option for MSI Installer
+* fix #522: Fix etc, log & var folders are not deleted from installation folder on MSI uninstall
+* fix #527: Support AlmaLinux 9.2 in linux perl installer
+* win32: Updated GLPI-AgentMonitor to v1.2.3 with spanish and russian translation
+
+contrib:
+* fix #429: Permit MSI package installation from current folder
+* fix #505: [Idea] Improve VBS deployment with a check if installed correctly or retry
+* fix #421: Fix installation on debian from a folder containing space
+
+1.5 Wed, 21 Jun 2023
+
+core:
+* Avoid an error with IO::Socket::SSL error reporting on older platform (CentOS7 confirmed)
+* Full refactoring of getFileHandle API usage to avoid bottlenecks during remoteinventory
+  of libssh2 remotes
+* Refactoring of inventory output to share same API between glpi-agent, glpi-inventory and
+  glpi-esx
+* Introduce GLPI::Agent::XML API based on XML::LibXML to get rid of deprecated XML::TreePP
+* fix #242: Fix ca-cert-dir can't be used on win32 & macosx since v1.3
+* Export all possible CA & Root certificates from Windows keystore for SSL support
+* Fix #257: Also support SSL certificates included in User keystore on windows
+* Cache trusted hosts to be able to resolv them in case of DNS resolving failure,
+  fixes fusioninventory/fusioninventory-agent#1033
+* Refactoring of communication with server to share compressing code between used classes and
+  to better report import errors when refused by the server
+* Handle early received SIGUSR1 signal as runnow request in place of killing the service
+* Report dedicated warning when inventory support is disabled server-side
+* win32: Add API to request win32 registry value with better Unicode support
+* win32: Get rid of encodeFromRegistry() API after enhanced Unicode registry support
+* Get rid of JSON::PP
+* fix #393: Support ssl-fingerprint option as a comma-separated list
+
+inventory:
+* check if we are running in a container before checking we are running in a virtualmachine
+* fix #135: Add MeshCentral as new recognized remote_mgmt, thanks to @miguelanruiz
+* fix #171: Add support for Trend Micro Security Agent antivirus on win32
+* fix #185: Normalize power supplies max power on Watt unit
+* Fix KingMax memory module manufacturer detection
+* Fix Positivo Informatica memory module manufacturer detection
+* Fix Samsung S22E390 monitor serialnumber
+* fix #196: don't inventory 2 times libvirt qemu virtualmachines on linux
+* Enhanced network adapter type detection on windows 10
+* fix #119: Use deviceid instead of agentid for json filename
+* fix #199: Fix GPU VRAM inventory on win32
+* Enhanced video card inventory on linux
+* fix #198: Fix enhancing storage inventory on win32
+* Fixed few minor issues while refactoring getFileHandle API
+* fix #229: Wrong vm name with Proxmox
+* MacOS: Refactoring to remove XML::XPath dependency
+* MacOS: Don't detect usb tablet as storage
+* MacOS: Support cd-rom reader inventory as storage
+* Update system users detection for WSL inventory on win32
+* fix #240: Update battery inventory on win32
+* Use ORACLE_BASE environment so Oracle database inventory supports latest versions
+* fix #232: Don't try to get profile username via WMI request to avoid timeout
+  on ActiveDirectoy during WSL inventory
+* Fix scan-profiles option to check softwares from not logged users on win32
+* Filter out session info for MongoDB database inventory
+* Update users inventory support on win32
+* PR #261: Fix regexp for IPMI FRU Controller inventory, thanks to po1vo
+* PR #262: Fix docker networks are virtual, thanks to po1vo
+* fix #258: Fix slots support on AIX
+* Fix HPUX slots support
+* PR #295: Update aliased network interfaces support on linux, thanks to po1vo
+* fix #323: Office license inventory was broken when a not expected value was found
+  in registry
+* fix #322, #328: Add new Acer monitor model support: V247Y, R240HY
+* Fix perl error when enumerating batteries on linux and the system sees HID one,
+  for a mouse as example
+* fix #344: Fix manufacturer for AG Neovo monitors
+* fix #346: Fix partition label for dirty vfat ones on linux
+* Feature: support assetname-support as option for agent on most unix
+  if 1 (the default), the short hostname is used as asset name
+  if 2, the as-is hostname (can be fqdn) is used as asset name
+  this feature does not apply on MacOS or Windows
+* fix #349: Use API supporting Unicode to read sofwares name and publisher on win32
+* Enhanced Unicode support when looking up registry values on win32
+* Add vpn connection as virtual interface on win32
+* fix missing category to Batteries module on win32 and fix perl error reported
+  when battery report on win32 is empty
+* fix #366: Don't inventory qemu guest agent process as qemu vm
+* fix #371: Add new Acer monitor model support: B246HL, B246HYL, V243HL, CB241H, V193
+* Fix inventory delay support for Local target to use the delaytime from configuration
+  in place of always 3600 seconds
+* Fix mysql/mariadb databases inventory if credentials includes special chars in password
+* fix #360: Avoid more WMI timeout during software inventory using scan_profiles option
+* Update service pack reporting on windows 10 and later to report BuildNumber + Update
+  Build Revision (UBR) like reported by system winver command.
+* fix #374: Better try to get profile username from powershell script
+* fix #384: Enhance #374 fix to support domain deleted user witout falling back on WMI
+* fix #367: Add Microsoft Defender Antivirus inventory support to MacOSX
+* fix #399: Support OracleXE database inventory
+* fix #409: Fix instance name in MSSQL database inventory
+* Fix LPAR serialnumber support on AIX
+* fix #420: Enhanced linux printer inventory based on CUPS
+* Fix cpu thread inventory on x86 linux
+* fix #411: Fix cpu thread on win32 when performance & efficiency cores are present
+* Updated pci.ids to 2023.06.19 version
+* Updated usb.ids to 2023.05.17 version
+* Bump Inventory task version to 1.13
+
+remoteinventory:
+* Security fix: CVE-2023-34254
+* Fix USERNAME & PASSWORD environment variable support with ssh remote inventory
+* fix #157: failure when creating a new winrm remote if a ssh one has been defined
+* Fix remoteGlob function for ssh remote inventory as it was preventing storage
+  inventory to work properly when accessing remote via ssh command
+* Don't try to register/update remotes when provided via --remote glpi-agent option
+* Support 'remote-workers' configuration to define how many remoteinventory we can
+  run in parallel
+* Initialize libssh2 in workers
+* Use vardir as home for .ssh/known_hosts file with libssh2 on windows
+* Fix environment inventory
+* Fix wrong encoding with winrm
+* Fix current users inventory via winrm
+* fix #160: Fix error when running winrm inventory from windows
+* Optimize few more API while using libssh2
+* More ssh inventory optimization while using libssh2
+* Updated remote modes support: perl, ssh and libssh2 for remote ssh, ssl for winrm
+* Fix libssh2 was missing from win32 packaging
+* Fix remote hostname for ssh remote inventory run from a win32 agent
+* Minor optimization by adding OSName caching to avoid recurrent same command request
+* Don't fallback on ssh if mode has been set to libssh2 only
+* Bump RemoteInventory task version to 1.2
+
+netdiscovery/netinventory:
+* Avoid to record invalid MAC Address from Netbios during netdiscovery task
+* Enhanced Idrac support getting serialnumber, thanks to spinal_df on the forum
+* Add support for option --v1 & --v2c to glpi-netdiscovery and glpi-netinventory scripts
+* fix #277: Wrong IFNUMBER set in connections for some devices supporting LLDP
+* Fix to support constraint on IFPORTDUPLEX, IFSTATUS & IFINTERNALSTATUS to prevent
+  devices not respecting standards to be rejected by GLPI 10. This can fix the import
+  of few Fortinet devices.
+* Add support for Zyxel devices
+* fix #337: Add TP-Link linux appliance support
+* fix #343: Add SNMP-FRAMEWORK-MIB snmpEngineID support to linux appliance MIBSupport.
+  It permits to import some Ubiquiti linux Appliance devices.
+* Fix EDP/LLDP information reconciliation on Extreme devices
+* Fix TRUNK flag setting: fixes a case on Extreme devices
+* Add new mac address detection algorithm: get the mac address of the first interface
+  for which speed is set
+* fix #351: Add better Canon printers & plotters support
+* Update LLDP support for Juniper devices
+* fix #353: Don't crash task on invalid jobs which may be sent by the server
+* Fix context switching reset with SNMPv3 which may prevent any new request to work
+* fix #372: Add support connection detection using Cisco Port Security feature
+* Enhanced Dell PowerConnect components support
+* Add Aruba MibSupport to fix model on wifi master AP
+* fix #382: Fix TOTAL page counter on Kyocera printers
+* fix #396: SKip CDP info from Cisco Communicator installed on computers
+* fix #417: Add Sophos UTM support
+* Updated sysobject.ids
+
+deploy:
+* Fix possible failure when mirror is set but misses file parts
+* Report friendly message if no mirror is defined to download file parts
+* Refacto to keep deploy tree as clean as possible
+* Refacto to add debug
+* Fix copy & move actions failing under win32 while running as a service
+* Add unit tests for ActionProcessor
+* Bump Deploy task version to 3.0
+
+esx:
+* Add SERIAL number to virtualmachines as they will be seen in BIOS
+* Updated glpi-esx: added --json option support, deprecated --directory option
+  in favor of new --path option, added --stdout option
+* fix #204: Fix wrong encoding
+* Enhanced vCenter 7.x support
+* Bump ESX task version to 2.8
+
+collect:
+* Better unicode support when looking up registry values
+* Bump Collect task version to 2.9
+
+injector:
+* Support --proxy option or use current user proxy environment if set
+* Add new injector source code written in golang
+
+proxy-server-plugin:
+* Fix file storage on windows
+* Bump Proxy plugin version to 2.2
+
+toolbox:
+* Fix Inventory page not displayed when netdiscovery or netinventory tasks are not installed
+* Default configuration now authorize to update toolbox interface from the UI
+* Support remotes management and remoteinventory task start
+* Bump ToolBox plugin version to 1.1
+
+basic-authentication-server-plugin:
+* New feature to support basic authentication on embedded http server via a dedicated plugin
+* Bump BasicAuthentication plugin version to 1.0
+
+packaging:
+* Update MacOSX packages to use OpenSSL 3.1.1 & zlib 1.2.13
+* Temporarily update PATH to use provided exe files when running agent from BAT scripts on win32
+* win32: updated dmidecode to 3.5
+* macosx: updated dmidecode to 3.5-macosx
+* fix #298: Fix cron script for debian in linux perl installer
+* fix #305: Support --proxy & --use-current-user-proxy options in linux perl installer
+* fix missing --no-category support in linux perl installer
+* fix #315: Add --user & --password options support in linux perl installer
+* fix #386: Support Oracle Linux 7 in linux perl installer
+* win32: Support GLPI-AgentMonitor v1.2.2 installation with MSI packaging
+
+tools:
+* Fix import command in netsim.sh script
+
+contrib:
+* Added an option to reconfigure installed agent in windows vbs script. It is enabled
+  by default.
+
+1.4 Fri, 01 Jul 2022
+
+core:
+* fix #150: 'ssl-fingerprint' option support is only possible when using at least
+  IO::Socket::SSL v1.967. This fixes 'no-ssl-check' support on CentOS 7.
+* fix #148: SSL no more supported in normal case as side-effect of #33 & #108
+  implemented feature
+* Enhanced error reporting with SSL connection issues
+
+inventory:
+* fix Oracle inventory when ORACLE_HOME is still found in environment variables
+* fix Office License scan on win32 due to an unexpected value key
+* fix #130: Add support for linux systemd-nspawn container
+* Add new Acer monitor model support: B226WL
+
+remoteinventory:
+* fix #159: Re-use port from given ssh url when using non-standard ssh port
+
+packaging:
+* Update MacOSX packages to use OpenSSL 3.0.4
+* fix #151: Linux perl installer Oracle Linux support
+
+1.3 Thu, 16 Jun 2022
+
+core:
+* fix: detect if agent is run via AppImage to cleanup LD_LIBRARY_PATH & LD_PRELOAD.
+  This avoid to use AppImage C library for binaries used during inventory.
+* refacto: cleanup some api calls to re-used still provided config during object
+  creation. This reduces code revue while checking HTTP::Client supported features.
+* fix #33: support MacOSX keychain to look for glpi server CA or SSL certificat when
+  communicating via SSL with GLPI server
+* fix #108: support Windows keystore to look for glpi server CA or SSL certificat when
+  communicating via SSL with GLPI server
+* Add 'ssl-fingerprint' option support to being able to trust a SSL server via its
+  server certificat known fingerprint
+* When 'no-ssl-check' option is used, warning is shown in log and the peer server
+  certificate fingerprint is also logged so it can be used in 'ssl-fingerprint'
+  option to trust peer ssl server
+
+inventory:
+* database: Oracle database inventory update
+* fix #114: JSON validation error on numeric monitor serial
+* fix #116: for win32 software inventory, better use temporary file to run uwp
+  powershell script on local computer. This prevents false positive alert from
+  few anti-virus when agent is run locally.
+* fix version for CentOS 7.x Operating System
+* fix partial property missing in json while partial inventory requested
+* fix #132: Missing LXC container memory limit
+* PR #134: Fixed screen's edid fetch on linux, thanks to yweber-volta
+* fix #127: Fix JSON UTF-8 encoding on MACOSX
+* fix additional-content option support for json format
+* Updated pci.ids to 2022.05.18 version
+* Updated usb.ids to 2022.05.20 version
+* Bump Inventory task version to 1.12
+
+remoteinventory:
+* fallback on ssh command access when libssh2 fails to connect
+* fix LiteManager remote management inventory
+
+netdiscovery/netinventory:
+* Enhanced DefensePro support, thanks to @sectoolsacc
+* Updated sysobject.ids
+
+packaging:
+* Windows MSI installer based on StrawBerry Perl 5.36.0
+* fix #120: Fix windows service installation when PERL5LIB env is set
+* fix #103: Embed Digest::MD5, Digest::SHA1, Digest::HMAC on windows for SNMP v3 authentication
+* Windows MSI: Fix strings to name windows scheduler task and firewall exceptions
+  This was preventing them from being deleted during upgrade and uninstall
+  Also added a custom action to remove firewall rules wrongly generated by older installations
+* Windows MSI: Use --force option while running now and using windows task scheduler configuration
+* fix #117: Fix error when using windows task scheduler
+* Windows MSI: Added support for few missing configuration parameters as MSI installer variable
+  This includes: NO_COMPRESSION, ADDITIONAL_CONTENT, JSON, LISTEN, REMOTE, SSL_CERT_FILE
+* Update MacOSX to use perl 5.36.0, OpenSSL 3.0.3 and zlib 1.2.12
+* fix #99: Wrong GLPI Agent lib folder name in MacOSX systems based on APFS
+* fix: AppImage support on older linux like CentOS 7
+* fix: AppImage uninstall support on older linux like CentOS 7
+* Update snap packaging to use perl 5.36.0
+* fix #139: Linux perl installer openSUSE support
+
+contrib:
+* Added option to uninstall OCS Agent in windows vbs script
+
+1.2 Wed, 13 Apr 2022
+
+core:
+* better error reporting on internal http client error
+
+inventory:
+* Use uts.name for Proxmox lxc containers
+* Support customized AnyDesk client as remote management inventory on unix/linux
+* Backport of @xo4yecTb patch: NoLog option for megacli util fusioninventory/fusioninventory-agent#996
+* Fix teamviewer remote_mgmt inventory regression introduced in previous version
+* linux: Added flatpak softwares inventory support
+* database inventory: support default credential to inventory SQL Server 2012 Express
+* linux: Update drive inventory to also try FS related tools to get more information
+* feat: Add OS installation date inventory support for unix/linux
+* Fix linux SLES 15 Service Pack detection, thanks to ncharles@gh
+* Avoid blocking until timeout for snap softwares inventory when snapd is unavailable
+* Add new Acer monitor model support: V226HQL, X193HQ, V193W, v193, V203W, V223HQ,
+  V193HQV, V276HL, B247Y, P1206P, P1203, P1283, X125H, H6517ABD, X128H, XGA PJ,
+  P5260i, AL1716, AL1717, AL1917, AL1916W, K242HQL, V226HQL, SA240Y, V246HQL,
+  V193L, V196L, V203H
+* Updated pci.ids to 2022.03.22 version
+* Updated usb.ids to 2022.04.02 version
+* Bump Inventory task version to 1.11
+
+remoteinventory:
+* Fix: Support username for SSH access
+* Fix: Use BatchMode option for SSH access to not request password
+* Fix: Use Net::SSH2 for user/password authentication
+* Upgrade packaging to request libssh2 & NetSSH2
+* Optimize SSH inventory by trying to use Net::SSH2 by default
+* Add --vardir option support to glpi-remote script
+
+netdiscovery/netinventory:
+* New feature: Support device storages with first use for Infortrend SAN inventory
+  This feature requires GLPI 10 server-side and disks are integrated as components
+* Fix: don't rescan config on each thread but share parent config to avoid threading
+  crash on win32
+* Enhance Qnap storage inventory
+* Update HP LaserJet Pro MFP printer series support
+* Fix case of NULL char malformed CDP connection SYSNAME preventing XML import
+* Updated sysobject.ids
+* Bump NetDiscovery task version to 5.1
+* Bump NetInventory task version to 5.1
+
+deploy:
+* fix: Fix UserInteraction messages encoding failure as perl 5.34 regression
+* Bump Deploy task version to 2.10
+
+collect:
+* Make collect task more verbose when debug is enabled
+* Bump Collect task version to 2.8
+
+ssl-server-plugin:
+* Fix: Support closing forked SSL connections without shutdown SSL to support Proxy server plugin
+* Support "ssl_cipher" option to set SSL version to use or disable obsolete protocol version
+* Bump SSL plugin version to 1.1
+
+injector:
+* Fix shortly named directory are skipped
+* Use option bundling to fix -R option read as -r with wrong side-effect
+
+contrib:
+* Fix #73: Fix ADMX/ADML for agent configuration via GPO
+
+packaging:
+* Add Linux AppImage installer support
+
+1.1 Fri, 04 Feb 2022
+
+core:
+* Define DateTime perl library as a requirement
+* Fix: Replace JSON requirement by Cpanel::JSON::XS as JSON is not thread-safe
+* Fix wrong next run date update after a long computer shutdown
+* Few optimizations
+* Support standard empty XML reply as server response
+
+netdiscovery/netinventory:
+* Make tasks compatible with GLPI 10 if GlpiInventory plugin is also installed
+ - if that case, server URL should be set with:
+  * /plugins/glpiinventory if the plugin has been manually installed in /plugins
+  * /marketplace/glpiinventory if the plugin has been installed via marketplace
+* Fix: Fix expiration time support to avoid aborting on legit short run
+* Updated sysobject.ids
+* Bump NetDiscovery task version to 5.0
+* Bump NetInventory task version to 5.0
+
+inventory:
+* Fix #44: Avoid double utf-8 encoding while sending JSON
+* Fix #47: Problem related to expected date format in software inventory
+* Fix: Make deprecated XML format compatible with GLPI 10 XML to JSON converter
+* solaris: Add IPv6 addressing inventory support
+* solaris: Add software install date and size inventory support
+* Support customized AnyDesk client as remote management inventory on win32
+* Update MongoDB database inventory
+* Support Mysql & Porstgresql connection timeout on database inventory
+* JSON could be modified following server version expected format
+* Ad ssl-cert-file option support
+* Updated pci.ids to 2022.01.28 version
+* Updated usb.ids to 2021.12.24 version
+
+remoteinventory:
+* Fix #50: handle right remote OS name for ssh remote inventory
+* Bump RemoteInventory task version to 1.0
+
+collect:
+* Make task compatible with GLPI 10 if GlpiInventory plugin is also installed
+* Bump Collect task version to 2.7
+
+deploy:
+* Make task compatible with GLPI 10 if GlpiInventory plugin is also installed
+* Bump Deploy task version to 2.9
+
+esx:
+* Make task compatible with GLPI 10 if GlpiInventory plugin is also installed
+* Bump ESX task version to 2.7
+
+packaging:
+* Fix #40: Windows MSI installer, agent feature must always be installed
+* Fix: Windows MSI Installer, fix logfile default on silent installation
+* Fix: Windows MSI Installer, always set right logfile and vardir path after changing
+  installation path in installer UI
+
+contrib:
+* vbs script can uninstall FusionInventory Agent
 
 1.0 Fri, 10 Dec 2021
 
@@ -94,8 +717,8 @@ esx:
 * Support OPERATINGSYSTEM node
 * Fix CONTROLLERS inventory
 
-proxy-plugin:
-* Bump Proxy HTTP server plugin version to 2.1
+proxy-server-plugin:
+* Bump Proxy plugin version to 2.1
 * Fix glpi_protocol option support
 * Fix legacy XML protocol fallback support
 

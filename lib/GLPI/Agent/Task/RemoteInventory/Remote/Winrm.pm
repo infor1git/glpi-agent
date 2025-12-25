@@ -9,35 +9,65 @@ use UNIVERSAL::require;
 use parent 'GLPI::Agent::Task::RemoteInventory::Remote';
 
 use URI;
+use POSIX;
+use MIME::Base64;
+use Encode qw(decode encode);
 
 use GLPI::Agent::Tools;
 use GLPI::Agent::SOAP::WsMan;
+use GLPI::Agent::Tools::Win32::TimeZone;
 
 use constant    supported => 1;
 
-sub init {
-    my ($self) = @_;
+use constant    supported_modes => qw(ssl);
 
-    my $url = URI->new($self->url());
+sub handle_url {
+    my ($self, $url) = @_;
+
+    my $scheme = $self->mode('ssl') ? "https" : "http";
+    $url->scheme($scheme);
+    bless $url, "URI::$scheme";
+
+    if ($self->mode('ssl')) {
+        $url->port(5986) if $url->port == 443;
+    } else {
+        $url->port(5985) if $url->port == 80;
+    }
+
+    $self->SUPER::handle_url($url);
 
     # We need to translate url for LWP::UserAgent client
-    my $port = $url->port;
-    $url->scheme( $self->mode('ssl') ? "https" : "http" );
-    # Reset port after changing scheme
-    $url->port($port);
     $url->path( "/wsman/" ) unless $url->path && $url->path ne '/';
     # Remove query in the case it contains mode=ssl
     $url->query_keywords([]);
     # Reset user/pass from URL as they are passed for UA as params
     $url->userinfo(undef);
 
+    # Keep canonical URL for prepare API
+    $self->{_canonical_url} = $url->canonical->as_string;
+}
+
+sub prepare {
+    my ($self) = @_;
+
     $self->{_winrm} = GLPI::Agent::SOAP::WsMan->new(
         logger      => $self->{logger},
-        url         => $url->canonical->as_string,
-        user        => $self->{_user} || $ENV{USERNAME},
-        password    => $self->{_pass} || $ENV{PASSWORD},
+        config      => $self->config(),
+        url         => $self->{_canonical_url},
+        user        => $self->user(),
+        password    => $self->pass(),
+        timeout     => $self->timeout(),
         winrm       => 1,
     );
+}
+
+sub timeout {
+    my ($self, $timeout) = @_;
+
+    # Reset http client timeout if required
+    $self->{_winrm}->timeout($timeout) if $timeout && $self->{_winrm};
+
+    $self->SUPER::timeout($timeout);
 }
 
 sub checking_error {
@@ -97,7 +127,7 @@ sub remoteCanRun {
     # Still return when looking for command with unix standard path
     return 0 if $binary =~ m{^(/usr)?/(s?bin|Library)/};
 
-    # Support where argument synatx with a path set
+    # Support where argument syntax with a path set
     if ($binary =~ m|(.*)[\\/]([^\\/]+)$|) {
         $binary = "$1:$2";
         $binary =~ s|/|\\|g;
@@ -153,6 +183,20 @@ sub getRemoteHostname {
 
 sub getRemoteFQDN {
     my ($self) = @_;
+
+    # First try to get FQDN from registry
+    my $tcpip_key = $self->getRemoteRegistryKey(
+        path        => 'HKEY_LOCAL_MACHINE/SYSTEM/CurrentControlSet/services/Tcpip/Parameters',
+        required    => [ 'Hostname', 'Domain', 'NV Hostname', 'NV Domain' ],
+        maxdepth    => 0,
+        logger      => $self->{logger}
+    );
+    if ($tcpip_key) {
+        my $hostname = $tcpip_key->{'/Hostname'} // $tcpip_key->{'/NV Hostname'};
+        my $domain   = $tcpip_key->{'/Domain'}   // $tcpip_key->{'/NV Domain'};
+        return join('.', $hostname, $domain)
+            unless empty($hostname) || empty($domain);
+    }
 
     my $computersystem = $self->_getComputerSystem()
         or return;
@@ -216,6 +260,42 @@ sub remoteReadLink {
 
 sub remoteGetNextUser {
     # GetNextUser not supported as not used for MSWin32 inventory
+}
+
+sub remoteTimeZone {
+    my ($self) = @_;
+
+    my $tz;
+
+    # Use PowerShell script to extract seconds since epoch
+    $self->{logger}->debug2("Using PowerShell to get timezone");
+    my @lines = map { my $line = $_ ; $line =~ s/\r$//; $line } grep { defined($_) } $self->runPowerShell(
+        script  => '(Get-TimeZone).Id;(Get-TimeZone).BaseUtcOffset.TotalSeconds'
+    );
+    if (@lines) {
+        my ($tz_name, $tz_offset) = @lines;
+        $tz->{NAME} = WindowsToIANA($tz_name) if $tz_name;
+        if ($tz_offset =~ /\d/) {
+            my $offset_sign = $tz_offset < 0 ? '-' : '+';
+            $tz->{OFFSET} = strftime($offset_sign."\%H\%M", gmtime(abs(int($tz_offset))));
+        }
+    }
+
+    return $tz;
+}
+
+sub runPowerShell {
+    my ($self, %params) = @_;
+
+    my $script = $params{script}
+        or return;
+
+    my $psOption = "-encodedCommand " . encode_base64(encode("UTF16-LE", $script), "");
+
+    return map { my $line = $_ ; $line =~ s/\r$//; decode("UTF-8", $line) } getAllLines(
+        command => "powershell -NonInteractive -ExecutionPolicy Unrestricted $psOption",
+        logger  => $self->{logger}
+    );
 }
 
 sub winrm_url {
@@ -411,21 +491,6 @@ sub unloadRemoteLoadedUserHives {
         $self->{logger}->debug("Failed to unload $userhive registry")
             unless $unload && $unload->{exitcode} == 0;
     }
-}
-
-## no critic (ProhibitMultiplePackages)
-package
-    URI::winrm;
-
-use strict;
-use warnings;
-
-use parent 'URI::http';
-
-sub default_port {
-    my ($self) = @_;
-    my $modessl = $self->query() && $self->query() =~ /\bmode=ssl\b/i;
-    return $modessl ? 5986 : 5985;
 }
 
 1;

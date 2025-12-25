@@ -1,9 +1,9 @@
     <p class='infos'>
-      <br/>
+      <em class='hint'>
       {_"Here is the list of known aliases"}.<br/>
       {_"Alias must be uniq, begin by a letter or digit and only contain letters, digits or eventually tirets, dots and underscores"}.<br/>
       {_"Aliases are used to fully resolve symbolic OID to plain numeric OID"}.<br/>
-      <br/>
+      </em>
     </p>
     <table>
       <thead>
@@ -50,8 +50,8 @@
       </tbody>
     </table>
     <div class='select-row'>
-      <div class='arrow-left'></div>
-      <input class='submit-secondary' type='submit' name='submit/delete' value='{_"Delete"}'>
+      <i class='ti ti-corner-left-up arrow-left'></i>
+      <button class='secondary' type='submit' name='submit/delete' value='1' alt='{_"Delete"}'><i class='secondary ti ti-trash-filled'></i>{_"Delete"}</button>
     </div>
     <hr/>
     <p>{_"Agent still supports following aliases"}:</p>
@@ -72,4 +72,4 @@
       </tbody>
     </table>
     <hr/>
-    <input class='big-button' type='submit' name='submit/add/alias' value='{_"Add new alias"}'>
+    <button class='big-button' type='submit' name='submit/add/alias' value='1' alt='{_("Add new alias")}'><i class='primary ti ti-plus'></i>{_("Add new alias")}</button>

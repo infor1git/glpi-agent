@@ -18,6 +18,7 @@ my $options = {};
 
 GetOptions(
     $options,
+    'assetname-support=i',
     'additional-content=s',
     'backend-collect-timeout=s',
     'ca-cert-dir=s',
@@ -59,10 +60,12 @@ GetOptions(
     'list-categories',
     'listen',
     'remote=s',
+    'remote-workers=i',
     'set-forcerun',
     'scan-homedirs',
     'scan-profiles',
     'server|s=s',
+    'ssl-fingerprint=s',
     'tag|t=s',
     'tasks=s',
     'timeout=i',
@@ -253,12 +256,20 @@ glpi-agent [options] [--server server|--local path]
     --html                         save the inventory as HTML (false)
     --json                         save the inventory as JSON (false)
     -f --force                     always send data to server (false)
-    --backend-collect-timeout=TIME timeout for inventory modules
-                                     execution (30)
+    --backend-collect-timeout=TIME timeout for inventory modules execution (180)
     --additional-content=FILE      additional inventory content file
+    --assetname-support=1|2        [unix/linux only] set the asset name depending on the given value:
+                                    - 1 (the default), the short hostname is used as asset name
+                                    - 2, the as-is hostname (can be fqdn) is used as asset name
+                                   this feature is not supported on MacOS or Windows
     --partial=CATEGORY             make a partial inventory of given category
                                      items, this option implies --json
     --credentials                  set credentials to support database inventory
+
+  RemoteInventory task specific options:
+    --remote=REMOTE[,REMOTE]...    specify a list of remotes to process in place
+                                   of remotes managed via glpi-remote command
+    --remote-workers=COUNT         maximum number of workers for remoteinventory task
 
   Package deployment task specific options:
     --no-p2p                       do not use peer to peer to download
@@ -272,6 +283,8 @@ glpi-agent [options] [--server server|--local path]
     --ca-cert-file=FILE            CA certificates file
     --no-ssl-check                 do not check server SSL certificate
                                      (false)
+    --ssl-fingerprint=FINGERPRINT  Trust server certificate if its SSL fingerprint
+                                     matches the given one
     -C --no-compression            do not compress communication with server
                                      (false)
     --timeout=TIME                 connection timeout, in seconds (180)
@@ -342,15 +355,15 @@ Send the results of tasks execution to given server.
 If I<URI> doesn't start with http:// or https://, the agent assume the
 parameter is a hostname and rewrite it as:
 
-    % --server=http://example/front/inventory.php
+    % --server=http://my-glpi-server/
 
 In general, GLPI server URL have this format:
 
-    http://example/front/inventory.php
+    http://my-glpi-server/
 
 and FusionInventory for GLPI this one:
 
-    http://example/glpi/plugins/fusioninventory
+    http://my-glpi-server/plugins/fusioninventory
 
 Multiple values can be specified, using comma as a separator.
 
@@ -426,13 +439,19 @@ See option I<--list-tasks> for the list of available tasks.
 
 Examples :
 
-* --tasks=inventory,deploy,inventory
-  First task executed is 'inventory', second task is 'deploy', third and last
-  task is 'inventory'.
+=over
 
-* --tasks=inventory,deploy,...
-  First executed task is 'inventory', second task is 'deploy' and then all
-  other available tasks are executed.
+=item * B<--tasks=inventory,deploy,inventory>
+
+First task executed is 'inventory', second task is 'deploy', third and last
+task is 'inventory'.
+
+=item * B< --tasks=inventory,deploy,...>
+
+First executed task is 'inventory', second task is 'deploy' and then all
+other available tasks are executed.
+
+=back
 
 =back
 

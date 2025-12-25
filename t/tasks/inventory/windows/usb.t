@@ -79,29 +79,27 @@ my %tests = (
     ],
     xppro2 => [
         {
-            MANUFACTURER => 'Cherry GmbH',
+            MANUFACTURER => 'CHERRY',
             NAME         => 'Concentrador USB genérico',
             CAPTION      => 'Concentrador USB genérico',
             VENDORID     => '046A',
             PRODUCTID    => '0009'
         },
         {
-            MANUFACTURER => 'Cherry GmbH',
+            MANUFACTURER => 'CHERRY',
             NAME         => 'Dispositivo compuesto USB',
-            CAPTION       => 'Dispositivo compuesto USB',
+            CAPTION      => 'Dispositivo compuesto USB',
             VENDORID     => '046A',
             PRODUCTID    => '0019'
         },
         {
-            CAPTION      => 'SmartTerminal XX44',
-            MANUFACTURER => 'Cherry GmbH',
+            MANUFACTURER => 'CHERRY',
             NAME         => 'SmartTerminal XX44',
             CAPTION      => 'SmartTerminal XX44',
             VENDORID     => '046A',
             PRODUCTID    => '002D'
         },
         {
-            CAPTION      => 'Printing Support',
             MANUFACTURER => 'HP, Inc',
             NAME         => 'Printing Support',
             CAPTION      => 'Printing Support',
@@ -110,7 +108,6 @@ my %tests = (
             PRODUCTID    => '3A17'
         },
         {
-            CAPTION      => 'HL-5250DN Printer',
             MANUFACTURER => 'Brother Industries, Ltd',
             NAME         => 'HL-5250DN Printer',
             CAPTION      => 'HL-5250DN Printer',
@@ -119,13 +116,22 @@ my %tests = (
             PRODUCTID    => '002B'
         },
         {
-            CAPTION      => 'LaserJet P2015 series',
             MANUFACTURER => 'HP, Inc',
             NAME         => 'LaserJet P2015 series',
             CAPTION      => 'LaserJet P2015 series',
             SERIAL       => '00CNBW86S20B',
             VENDORID     => '03F0',
             PRODUCTID    => '3817'
+        }
+    ],
+    "bar-code-scanner" => [
+        {
+            MANUFACTURER => 'Symbol Technologies',
+            NAME         => 'Bar Code Scanner',
+            CAPTION      => 'Bar Code Scanner',
+            SERIAL       => '28A1CC69D1D8AE4585EDA53F7CD6CB88',
+            VENDORID     => '05E0',
+            PRODUCTID    => '1200'
         }
     ]
 );

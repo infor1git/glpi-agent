@@ -42,7 +42,35 @@ sub doInventory {
         $os->{VERSION}   = $2;
     }
 
+    # Parse /var/log/install.log and use the last kern.boottime before install is finished as install date
+    if (has_file("/var/db/.AppleSetupDone")) {
+        my $installdate = _getInstallDate(
+            command => "stat -f \%m /var/db/.AppleSetupDone",
+            logger  => $logger
+        );
+        $os->{INSTALL_DATE} = $installdate
+            if $installdate;
+    }
+
     $inventory->setOperatingSystem($os);
+}
+
+sub _getInstallDate {
+    my (%params) = @_;
+
+    my $date = getFirstLine(%params)
+        or return;
+
+    if (DateTime->require()) {
+        eval {
+            my $dt = DateTime->from_epoch( epoch => $date );
+            $date = $dt->datetime(' ');
+        }
+    } else {
+        $date = getFormatedLocalTime($date);
+    }
+
+    return $date;
 }
 
 1;

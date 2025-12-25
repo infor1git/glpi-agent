@@ -7,7 +7,6 @@ use parent 'Exporter';
 use English qw(-no_match_vars);
 use File::Which;
 use File::Basename qw(basename);
-use Memoize;
 use Time::Local;
 
 use GLPI::Agent::Tools;
@@ -20,9 +19,9 @@ our @EXPORT = qw(
     getFilesystemsTypesFromMount
     getProcesses
     getRoutingTable
+    getRootFSBirth
+    getXAuthorityFile
 );
-
-memoize('getProcesses');
 
 sub getDeviceCapacity {
     my (%params) = @_;
@@ -113,13 +112,13 @@ sub _parseDhcpLeaseFile {
     my ($logger, $if, $lease_file) = @_;
 
 
-    my $handle = getFileHandle(file => $lease_file, logger => $logger);
-    return unless $handle;
+    my @lines = getAllLines(file => $lease_file, logger => $logger)
+        or return;
 
     my ($lease, $dhcp, $server_ip, $expiration_time);
 
     # find the last lease for the interface with its expire date
-    while (my $line = <$handle>) {
+    foreach my $line (@lines) {
         if ($line=~ /^lease/i) {
             $lease = 1;
             next;
@@ -156,7 +155,6 @@ sub _parseDhcpLeaseFile {
             $expiration_time = timelocal($sec, $min, $hour, $day, $mon, $year);
         }
     }
-    close $handle;
 
     return unless $expiration_time;
 
@@ -167,19 +165,18 @@ sub _parseDhcpLeaseFile {
 
 sub getFilesystemsFromDf {
     my (%params) = @_;
-    my $handle = getFileHandle(%params);
+    my @lines = getAllLines(%params)
+        or return;
 
     my @filesystems;
 
     # get headers line first
-    my $line = <$handle>;
-    return unless $line;
+    my $header = shift @lines;
+    return unless $header;
 
-    chomp $line;
-    my @headers = split(/\s+/, $line);
+    my @headers = split(/\s+/, $header);
 
-    while (my $line = <$handle>) {
-        chomp $line;
+    foreach my $line (@lines) {
         my @infos = split(/\s+/, $line);
 
         # depending on the df implementation, and how it is called
@@ -216,8 +213,6 @@ sub getFilesystemsFromDf {
         };
     }
 
-    close $handle;
-
     return wantarray ? @filesystems : \@filesystems ;
 }
 
@@ -227,11 +222,11 @@ sub getFilesystemsTypesFromMount {
         @_
     );
 
-    my $handle = getFileHandle(%params);
-    return unless $handle;
+    my @lines = getAllLines(%params)
+        or return;
 
     my @types;
-    while (my $line = <$handle>) {
+    foreach my $line (@lines) {
         # BSD-style:
         # /dev/mirror/gm0s1d on / (ufs, local, soft-updates)
         if ($line =~ /^\S+ on \S+ \((\w+)/) {
@@ -245,7 +240,6 @@ sub getFilesystemsTypesFromMount {
             next;
         }
     }
-    close $handle;
 
     ### raw result: @types
 
@@ -266,14 +260,15 @@ sub _getProcessesBusybox {
         @_
     );
 
-    my $handle = getFileHandle(%params);
+    my @lines = getAllLines(%params)
+        or return;
 
     # skip headers
-    my $line = <$handle>;
+    shift @lines;
 
     my @processes;
 
-    while ($line = <$handle>) {
+    foreach my $line (@lines) {
         next unless $line =~
             /^
             \s* (\S+)
@@ -295,8 +290,6 @@ sub _getProcessesBusybox {
         };
     }
 
-    close $handle;
-
     return @processes;
 }
 
@@ -308,17 +301,18 @@ sub _getProcessesOther {
         @_
     );
 
-    my $handle = getFileHandle(%params);
+    my @lines = getAllLines(%params)
+        or return;
 
     # skip headers
-    my $line = <$handle>;
+    shift @lines;
 
     # get the current timestamp
     my $localtime = time();
 
     my @processes;
 
-    while ($line = <$handle>) {
+    foreach my $line (@lines) {
 
         next unless $line =~
             /^ \s*
@@ -353,35 +347,8 @@ sub _getProcessesOther {
         };
     }
 
-    close $handle;
-
     return @processes;
 }
-
-my %month = (
-    Jan => '01',
-    Feb => '02',
-    Mar => '03',
-    Apr => '04',
-    May => '05',
-    Jun => '06',
-    Jul => '07',
-    Aug => '08',
-    Sep => '09',
-    Oct => '10',
-    Nov => '11',
-    Dec => '12',
-);
-my %day = (
-    Mon => '01',
-    Tue => '02',
-    Wed => '03',
-    Thu => '04',
-    Fry => '05',
-    Sat => '06',
-    Sun => '07',
-);
-my $monthPattern = join ('|', keys %month);
 
 # Computes a consistent process starting time from the process etime value.
 sub _getProcessStartTime {
@@ -420,18 +387,20 @@ sub getRoutingTable {
         @_
     );
 
-    my $handle = getFileHandle(%params);
-    return unless $handle;
+    my @lines = getAllLines(%params)
+        or return;
 
     my $routes;
 
     # first, skip all header lines
-    while (my $line = <$handle>) {
+    while (1) {
+        my $line = shift @lines;
+        last unless defined($line);
         last if $line =~ /^Destination/;
     }
 
     # second, collect routes
-    while (my $line = <$handle>) {
+    foreach my $line (@lines) {
         next unless $line =~ /^
             (
                 $ip_address_pattern
@@ -449,11 +418,54 @@ sub getRoutingTable {
                 link\#\d+
             )
             /x;
+        # Don't override a route as the first one is the more specific
+        next if $routes->{$1};
         $routes->{$1} = $2;
     }
-    close $handle;
 
     return $routes;
+}
+
+sub getRootFSBirth {
+    my (%params) = (
+        command => 'stat /',
+        @_
+    );
+
+    return getFirstMatch(
+        pattern => qr{^\s*Birth:\s+(\d+-\d+-\d+\s\d+:\d+:\d+)},
+        %params
+    );
+}
+
+sub getXAuthorityFile {
+    my (%params) = @_;
+
+    # first identify users using X
+    my %users;
+    foreach my $unix (Glob("/tmp/.X11-unix/*")) {
+        my $stat = FileStat($unix);
+        next unless $stat;
+        $users{$stat->uid} = 1;
+    }
+
+    # then found first users process using XAUTHORITY environment
+    my @pids = sort { $a <=> $b } map { int($_) } grep { /^\d+$/ } map { m{/proc/(.*)/environ} } Glob("/proc/*/environ");
+    my %stats;
+    foreach my $uid (keys(%users)) {
+        foreach my $pid (@pids) {
+            my $file = "/proc/$pid/environ";
+            my $stat = $stats{$file};
+            # Cache file stat if we need to test for another user
+            $stat = $stats{$file} = FileStat($file) unless $stat;
+            next unless $stat && $stat->uid eq $uid;
+            my $content = getAllLines(file => $file, no_error_log => 1, %params)
+                or next;
+            my ($xauthority) = map { /^\w+=(.*)$/ } grep { /^XAUTHORITY=/ } split("\0", $content);
+            # Return on first found file
+            return $xauthority if $xauthority && has_file($xauthority);
+        }
+    }
 }
 
 1;
@@ -545,3 +557,11 @@ Returns the routing table as an hashref, by parsing netstat command output.
 =item file the file to use, as an alternative to the command
 
 =back
+
+=head2 getRootFSBirth
+
+Returns the root filesystem birth date, by parsing stat / command output.
+
+=head2 getXAuthorityFile
+
+Returns the first found XAuthority file of any current X server user.

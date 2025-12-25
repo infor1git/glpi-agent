@@ -99,21 +99,18 @@ sub reset_original_context {
 sub _setIndexedValues {
     my ($self, $file) = @_;
 
-    my $handle = getFileHandle(file => $file || $self->{_file});
-
-    # check first line
-    my $first_line = <$handle>;
-    seek($handle, 0, 0);
+    my @lines = getAllLines(file => $file || $self->{_file})
+        or die "No content found in ".($file || $self->{_file})." file\n";
 
     # check first line for safety
-    die "invalid file format\n" unless $first_line =~ /^(\S+) = .*/;
+    die "invalid file format\n" unless $lines[0] =~ /^(\S+) = .*/;
 
-    my $numerical = substr($first_line, 0, 1) eq '.' ? 1 : 0 ;
+    my $numerical = substr($lines[0], 0, 1) eq '.' ? 1 : 0 ;
     my $last_value;
 
     $self->{_walk} = {};
 
-    while (my $line = <$handle>) {
+    foreach my $line (@lines) {
 
         # Use different regex if walk contains numerical or symbolic oids
         if ($numerical) {
@@ -159,15 +156,13 @@ sub _setIndexedValues {
         last if $line =~ /^End of MIB$/;
 
         # potential continuation
-        if ($line !~ /^$/ && $line !~ /= ""$/ && $last_value) {
+        if ($line !~ /^$/ && $line !~ /= ""$/ && $line !~ /= STRING:$/ && $last_value) {
             if ($last_value->[0] eq 'STRING' &&
                 $last_value->[1] !~ /"$/
             ) {
-                chomp $line;
                 $last_value->[1] .= "\n" . $line;
                 next;
             } elsif ($last_value->[0] eq 'Hex-STRING') {
-                chomp $line;
                 $last_value->[1] .= $line;
                 next;
             }
@@ -175,8 +170,6 @@ sub _setIndexedValues {
 
         $last_value = undef;
     }
-
-    close ($handle);
 }
 
 sub _setValue {
@@ -226,6 +219,9 @@ sub _getValue {
     $oid = $nextoidpart;
 
     my $base = $self->{_walk}->{$root};
+
+    return $base unless $oid;
+
     foreach my $num (split(/\./, substr($oid,1))) {
         # No value if no subnode indexed
         # Also no value if requested subnode is not indexed
@@ -258,7 +254,7 @@ sub _deepwalk {
     foreach my $ref (@{$base->[0]}) {
         # We need the subnode key as hash key
         my $key = $ref->[1];
-        # Keep the value is one is available
+        # Keep the value if one is available
         if (defined($ref->[3])) {
             $hash->{$key} = _getSanitizedValue(@{$ref->[3]});
         }

@@ -8,6 +8,7 @@ use parent "GLPI::Agent::HTTP::Server::ToolBox::Results::Fields";
 use Memoize;
 
 use GLPI::Agent::Tools;
+use GLPI::Agent::Target::Local;
 
 memoize('__sortable_by_ip');
 
@@ -171,7 +172,7 @@ sub fields {
         section => "netscan",
         type    => "readonly",
         from    => "AUTHSNMP",
-        text    => "SNMP Credential",
+        text    => "Credential",
         column  => 31,
         editcol => 1,
         index   => 31,
@@ -185,6 +186,41 @@ sub __sortable_by_ip {
     return $device->{ip} unless $device->{ip} =~ /^\d+\.\d+\.\d+\.\d+$/;
     # encoding ip as hex string make it sortable by cmp comparator
     return join("", map { sprintf("%02X",$_) } split(/\./, $device->{ip}));
+}
+
+sub _getDevices {
+    my ($self) = @_;
+
+    # Get stored credentials & ip_range for devices from local target storage
+    my $yaml_config = $self->{results}->yaml('configuration') || {};
+    my $path = $yaml_config->{networktask_save} || '.';
+
+    # Make sure path exists as folder before accessing storage
+    mkdir $path unless -d $path;
+
+    my $target = GLPI::Agent::Target::Local->new(
+        logger     => $self->{logger},
+        delaytime  => 0,
+        basevardir => $self->{results}->{toolbox}->{server}->{agent}->{config}->{vardir},
+        path       => $path
+    );
+
+    my $storage = $target->getStorage();
+    my $devices = $storage->restore(name => "NetDisco-Devices") // {};
+
+    # Check to clean up expired ips but no more than one time an hour
+    my $now = time;
+    if (!$devices->{_cleanup_expiration} || $now > $devices->{_cleanup_expiration}) {
+        foreach my $ip (keys(%{$devices})) {
+            next unless ref($devices->{$ip});
+            delete $devices->{$ip}
+                if $devices->{$ip}->{expiration} && $now > $devices->{$ip}->{expiration};
+        }
+        $devices->{_cleanup_expiration} = $now + 3600;
+        $storage->save(name => "NetDisco-Devices", data => $devices);
+    }
+
+    return $devices;
 }
 
 sub analyze {
@@ -202,10 +238,28 @@ sub analyze {
 
     my $device = $self->fields_common_analysis($dev);
 
-    # Fix credential if AUTHSNMP was set into []
-    $device->{credential} = $1
-        if ($device->{credential} && $device->{credential} =~ /^\[(.*)\]$/);
+    my $device_scan_result;
+    unless ($device->{credential} && $device->{ip_range}) {
+        my $devices = $self->_getDevices();
+        $device_scan_result = $devices->{$device->{ip}}
+            if $devices && $devices->{$device->{ip}};
+    }
 
+    # Fix credential & ip_range if set in dedicated storage
+    if ($device_scan_result) {
+        $device->{credential} = $device_scan_result->{credential}
+            if $device_scan_result->{credential};
+        $device->{ip_range} = $device_scan_result->{ip_range}
+            if $device_scan_result->{ip_range};
+        # Set deviceid for deduplication
+        # 'ha-host' is set when inventory is done on an ESX server, this doesn't work for a vCenter
+        $device->{deviceid} = ref($device_scan_result->{deviceid}) eq 'HASH' ? $device_scan_result->{deviceid}->{'ha-host'} : $device_scan_result->{deviceid}
+            if $device_scan_result->{deviceid};
+    }
+
+    # Fix credential if credential was set into []
+    $device->{credential} = $1
+        if $device->{credential} && $device->{credential} =~ /^\[(.*)\]$/;
 
     if ($dev->{IPS} && ref($dev->{IPS}->{IP})) {
         $device->{ips} = join(',', @{$dev->{IPS}->{IP}});

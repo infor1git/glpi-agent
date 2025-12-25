@@ -3,7 +3,7 @@ package GLPI::Agent::Protocol::Message;
 use strict;
 use warnings;
 
-use JSON;
+use Cpanel::JSON::XS;
 
 use GLPI::Agent::Logger;
 
@@ -57,12 +57,18 @@ sub _convert {
     return $hash;
 }
 
+sub converted {
+    my ($self) = @_;
+
+    return _convert($self->{_message});
+}
+
 sub getRawContent {
     my ($self) = @_;
 
     return $self->{_message} unless ref($self->{_message});
 
-    return JSON->new->encode($self->{_message});
+    return Cpanel::JSON::XS->new->encode($self->{_message});
 }
 
 sub getContent {
@@ -70,7 +76,7 @@ sub getContent {
 
     return $self->{_message} unless ref($self->{_message});
 
-    return JSON->new->utf8->canonical->indent->space_after->encode(_convert($self->{_message}));
+    return Cpanel::JSON::XS->new->utf8->canonical->indent->space_after->encode($self->converted());
 }
 
 sub set {

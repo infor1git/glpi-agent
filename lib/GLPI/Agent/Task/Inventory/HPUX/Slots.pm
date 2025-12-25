@@ -33,17 +33,20 @@ sub doInventory {
 }
 
 sub _getSlots {
-    my $handle = getFileHandle(@_);
-    return unless $handle;
+    my (%params) = @_;
+
+    my @lines = getAllLines(%params)
+        or return;
 
     my @slots;
-    while (my $line = <$handle>) {
+    foreach my $line (@lines) {
         my @info = split(/:/, $line);
         push @slots, {
-            DESIGNATION => $info[17],
+            NAME        => $info[9].$info[10],
+            DESIGNATION => $info[13],
+            DESCRIPTION => $info[17],
         };
     }
-    close $handle;
 
     return @slots;
 }

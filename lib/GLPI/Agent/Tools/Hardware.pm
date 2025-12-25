@@ -14,6 +14,7 @@ use GLPI::Agent::SNMP::Device;
 our @EXPORT = qw(
     getDeviceInfo
     getDeviceFullInfo
+    getManufacturerIDInfo
 );
 
 my %types = (
@@ -130,10 +131,14 @@ my %interface_variables = (
     IFSTATUS         => {
         oid  => '.1.3.6.1.2.1.2.2.1.8',
         type => 'constant',
+        min  => 1,
+        max  => 7,
     },
     IFINTERNALSTATUS => {
         oid  => '.1.3.6.1.2.1.2.2.1.7',
         type => 'constant',
+        min  => 1,
+        max  => 3,
     },
     IFLASTCHANGE     => {
         oid  => '.1.3.6.1.2.1.2.2.1.9',
@@ -162,6 +167,8 @@ my %interface_variables = (
     IFPORTDUPLEX     => {
         oid  => '.1.3.6.1.2.1.10.7.2.1.19',
         type => 'constant',
+        min  => 1,
+        max  => 3,
     },
     IFALIAS          => {
         oid  => '.1.3.6.1.2.1.31.1.1.1.18',
@@ -189,11 +196,11 @@ my %consumable_types = (
 my %printer_pagecounters_variables = (
     TOTAL      => {
         oid   => [
-            '.1.3.6.1.4.1.1347.42.10.1.1.12.1.1', #Kyocera specific counter for printers and MF
+            '.1.3.6.1.4.1.1347.43.10.1.1.12.1.1', #Kyocera specific counter for printers and MF
                                                   # If you were really keen you could calculate misfeed rates
-                                                  # based on the difference betwwen this and the default OID
+                                                  # based on the difference between this and the default OID
                                                   # value and use it to flag a call out of service techs.
-                                                  # Hint: Increasing rate = bald paper pickup roller tyres.
+                                                  # Hint: Increasing rate = bad paper pickup roller types.
             '.1.3.6.1.2.1.43.10.2.1.4.1.1'        #Default Value
             ]
     },
@@ -257,9 +264,11 @@ sub _getDevice {
     my $snmp    = $params{snmp};
     my $datadir = $params{datadir};
     my $logger  = $params{logger};
+    my $config  = $params{config};
 
     my $device = GLPI::Agent::SNMP::Device->new(
         snmp   => $snmp,
+        glpi   => $params{glpi} // '', # glpi server version if we need to check feature support
         logger => $logger
     );
 
@@ -311,7 +320,8 @@ sub _getDevice {
     # load supported mibs regarding sysORID list as this list permits to
     # identify device supported MIBs. But mib supported can also be tested
     # regarding sysobjectid in some case, so we pass it as argument
-    $device->loadMibSupport($sysobjectid);
+    # $config is required for ConfigurationPlugin MibSupport module
+    $device->loadMibSupport($sysobjectid, $config);
 
     # Set type from MibSupport
     $device->setType();
@@ -367,6 +377,14 @@ sub getDeviceInfo {
     return $device->getDiscoveryInfo();
 }
 
+sub getManufacturerIDInfo {
+    my ($manufacturer_id) = @_;
+
+    return unless $manufacturer_id;
+
+    return $sysobjectid{$manufacturer_id};
+}
+
 sub _getSysObjectIDInfo {
     my (%params) = @_;
 
@@ -390,7 +408,7 @@ sub _getSysObjectIDInfo {
     }
 
     if (!$device_id) {
-        $logger->debug("invalid sysobjectID $params{id}: no device ID")
+        $logger->debug2("partial sysobjectID $params{id}: only manufacturer ID")
             if $logger;
     }
 
@@ -411,8 +429,7 @@ sub _getSysObjectIDInfo {
     $match = $sysobjectid{$manufacturer_id};
     if ($match) {
         $logger->debug(
-            "partial match for sysobjectID $params{id} in database: ".
-            "unknown device ID"
+            "partial match for sysobjectID $params{id} on manufacturer ID"
         ) if $logger;
         return $match;
     }
@@ -430,13 +447,12 @@ sub _loadSysObjectIDDatabase {
 
     return unless $params{datadir};
 
-    my $handle = getFileHandle(file => "$params{datadir}/sysobject.ids");
-    return unless $handle;
+    my @lines = getAllLines(file => "$params{datadir}/sysobject.ids")
+        or return;
 
-    while (my $line = <$handle>) {
+    foreach my $line (@lines) {
         next if $line =~ /^#/;
         next if $line =~ /^$/;
-        chomp $line;
         my ($id, $manufacturer, $type, $model, $module) = split(/\t/, $line);
         $sysobjectid{$id} = {
             manufacturer => $manufacturer,
@@ -445,8 +461,6 @@ sub _loadSysObjectIDDatabase {
         };
         $sysobjectid{$id}->{module} = $module if $module;
     }
-
-    close $handle;
 }
 
 sub getDeviceFullInfo {
@@ -532,7 +546,7 @@ sub getDeviceFullInfo {
     if ($ports && %$ports) {
         $device->{PORTS}->{PORT} = [
             map { $ports->{$_} }
-            sort { $a <=> $b }
+            sort { _numify($a) <=> _numify($b) }
             keys %{$ports}
         ];
     } else {
@@ -540,6 +554,17 @@ sub getDeviceFullInfo {
     }
 
     return $device->getInventory();
+}
+
+sub _numify {
+    my ($num) = @_;
+    return int($num) if $num =~ /^\d+$/;
+    return 0 unless $num =~ /^[0-9.]+$/;
+    # Here we have digits separated by dots and maybe more than one like seen on Sophos devices
+    my @digits = split(/\./, $num);
+    $num = shift @digits;
+    # Manage to have a real number even when more than one dot are found
+    return $num.".".join("", map { sprintf("%03d", $_) } @digits);
 }
 
 sub _setGenericProperties {
@@ -580,6 +605,15 @@ sub _setGenericProperties {
                                       $raw_value;
             $ports->{$suffix}->{$key} = $value
                 if defined $value && $value ne '';
+
+            # Check constraint on constant to remove broken values
+            if ($type eq 'constant') {
+                my ($min, $max) = ($variable->{min}, $variable->{max});
+                delete $ports->{$suffix}->{$key}
+                    if defined($min) && $value < $min;
+                delete $ports->{$suffix}->{$key}
+                    if defined($max) && $value > $max;
+            }
         }
     }
 
@@ -1055,6 +1089,9 @@ sub _setConnectedDevices {
             my $lldp_connection = $port->{CONNECTIONS}->{CONNECTION};
             my $cdp_connection  = $cdp_info->{$interface_id};
 
+            # Skip CDP entry if MODEL shows this is a computer with Cisco Communicator installed
+            next if $cdp_connection->{MODEL} && $cdp_connection->{MODEL} =~ /^Communicator/i;
+
             if ($lldp_connection) {
                 my $match = 0;
 
@@ -1108,7 +1145,12 @@ sub _setConnectedDevices {
             my $edp_connection  = $edp_info->{$interface_id};
 
             if ($lldp_connection) {
-                if ($edp_connection->{SYSDESCR} eq $lldp_connection->{SYSDESCR}) {
+                # Also check if SYSMAC is the same
+                if (
+                    first {
+                        defined($edp_connection->{$_}) && defined($lldp_connection->{$_}) && lc($edp_connection->{$_}) eq lc($lldp_connection->{$_})
+                    } qw(SYSDESCR SYSMAC)
+                ) {
                     # same device, everything OK
                     foreach my $key (qw/IP/) {
                         $lldp_connection->{$key} = $edp_connection->{$key};
@@ -1131,6 +1173,17 @@ sub _setConnectedDevices {
     }
 }
 
+sub _sortChassisIdSuffix {
+    my ($a, $b) = @_;
+    my @a = split('\.', $a);
+    my @b = split('\.', $b);
+    return (
+            defined($a[2]) && defined($b[2]) && $a[2] <=> $b[2]
+        ) || (
+            defined($a[1]) && defined($b[1]) && $a[1] <=> $b[1]
+        ) || $a[0] <=> $b[0];
+}
+
 sub _getLLDPInfo {
     my (%params) = @_;
 
@@ -1140,6 +1193,7 @@ sub _getLLDPInfo {
     my $results;
     my $ChassisIdSubType = $snmp->walk('.1.0.8802.1.1.2.1.4.1.1.4');
     my $lldpRemChassisId = $snmp->walk('.1.0.8802.1.1.2.1.4.1.1.5');
+    my $lldpRemPortIdSubtype = $snmp->walk('.1.0.8802.1.1.2.1.4.1.1.6');
     my $lldpRemPortId    = $snmp->walk('.1.0.8802.1.1.2.1.4.1.1.7');
     my $lldpRemPortDesc  = $snmp->walk('.1.0.8802.1.1.2.1.4.1.1.8');
     my $lldpRemSysName   = $snmp->walk('.1.0.8802.1.1.2.1.4.1.1.9');
@@ -1165,7 +1219,9 @@ sub _getLLDPInfo {
         '7' => "local"
     );
 
-    while (my ($suffix, $mac) = each %{$lldpRemChassisId}) {
+    # Always parse LLDP infos in the same order
+    foreach my $suffix (sort { _sortChassisIdSuffix($a, $b) } keys(%{$lldpRemChassisId})) {
+        my $mac = $lldpRemChassisId->{$suffix};
         my $sysdescr = getCanonicalString($lldpRemSysDesc->{$suffix});
         my $sysname = getCanonicalString($lldpRemSysName->{$suffix});
         next unless ($sysdescr || $sysname);
@@ -1194,20 +1250,55 @@ sub _getLLDPInfo {
         }
 
         my $connection = {
-            SYSMAC => lc(alt2canonical($mac))
+            SYSMAC => alt2canonical($mac) || alt2canonical(getCanonicalString($mac)) || getCanonicalMacAddress($mac)
         };
         $connection->{SYSDESCR} = $sysdescr if $sysdescr;
         $connection->{SYSNAME} = $sysname if $sysname;
 
-        # portId is either a port number or a port mac address,
-        # duplicating chassisId
-        my $portId = $lldpRemPortId->{$suffix};
-        if ($portId !~ /^0x/ or length($portId) != 14) {
-            $connection->{IFNUMBER} = getCanonicalString($portId);
+        # portId is either a port number or a port mac address, duplicating chassisId
+        my $PortIdSubtype = "";
+        $PortIdSubtype = getCanonicalString($lldpRemPortIdSubtype->{$suffix})
+            if $lldpRemPortIdSubtype && !empty($lldpRemPortIdSubtype->{$suffix});
+        my $portId = getCanonicalString($lldpRemPortId->{$suffix} // "");
+        # As before we need to guess portId type if not set
+        if (!$PortIdSubtype) {
+            if ($portId =~ $mac_address_pattern) {
+                my $thismac = alt2canonical($portId);
+                push @{$connection->{MAC}}, $thismac unless !$thismac || $thismac eq $connection->{SYSMAC};
+            } elsif (!empty($portId)) {
+                if ($portId =~ /^\d+$/) {
+                    $connection->{IFNUMBER} = $portId;
+                } else {
+                    my $maybe_mac = alt2canonical($portId) || getCanonicalMacAddress($portId);
+                    if ($maybe_mac && $maybe_mac ne $connection->{SYSMAC}) {
+                        # Add mac only if different than SYSMAC
+                        push @{$connection->{MAC}}, $maybe_mac;
+                    } else {
+                        $connection->{IFDESCR} = $portId;
+                    }
+                }
+            }
+        } elsif ($PortIdSubtype eq '3') { # Mac address
+            my $mac = alt2canonical($portId) || getCanonicalMacAddress($lldpRemPortId->{$suffix});
+            # Add mac only if different than SYSMAC
+            push @{$connection->{MAC}}, $mac if $mac && $mac ne $connection->{SYSMAC};
+        } elsif ($PortIdSubtype eq '1' || $PortIdSubtype eq '5' || $PortIdSubtype eq '7') { # Interface alias or interface name or "local", "local" should be the remote IFNUMBER
+            if ($portId =~ /^\d+$/) {
+                $connection->{IFNUMBER} = $portId;
+            } elsif ($portId) {
+                $connection->{IFDESCR} = $portId;
+            }
         }
 
         my $ifdescr = getCanonicalString($lldpRemPortDesc->{$suffix});
-        $connection->{IFDESCR} = $ifdescr if $ifdescr;
+        unless (empty($ifdescr)) {
+            # Sometime ifnumber is indeed set as ifdescr
+            if ($ifdescr =~ /^\d+$/ && empty($connection->{IFNUMBER})) {
+                $connection->{IFNUMBER} = $ifdescr;
+            } elsif (empty($connection->{IFDESCR})) {
+                $connection->{IFDESCR} = $ifdescr;
+            }
+        }
 
         my $id           = _getElement($suffix, -2);
         my $interface_id =
@@ -1271,28 +1362,28 @@ sub _getCDPInfo {
         if ($deviceId =~ /^0x/) {
             if (length($deviceId) == 14) {
                 # let's assume it is a mac address if the length is 6 bytes
-                $connection->{SYSMAC} = lc(alt2canonical($deviceId));
+                $connection->{SYSMAC} = alt2canonical($deviceId);
             } else {
                 # otherwise it's may be an hex-encode hostname
                 $deviceId = getCanonicalString($deviceId);
                 if ($deviceId =~ /^[0-9A-Fa-f]{12}$/) {
                     # let's assume it is a mac address if the length is 12 chars
-                    $connection->{SYSMAC} = lc(alt2canonical($deviceId));
+                    $connection->{SYSMAC} = alt2canonical($deviceId);
                 } elsif (!$connection->{SYSNAME}) {
                     $connection->{SYSNAME} = $deviceId;
                 }
             }
         } elsif (!$connection->{SYSNAME}) {
-            $connection->{SYSNAME} = $deviceId;
+            $connection->{SYSNAME} = getCanonicalString($deviceId);
         }
 
         if ($connection->{SYSNAME} &&
             $connection->{SYSNAME} =~ /^SIP([A-F0-9a-f]*)$/) {
-            $connection->{SYSMAC} = lc(alt2canonical("0x".$1));
+            $connection->{SYSMAC} = alt2canonical("0x".$1);
         } elsif ($connection->{SYSNAME} &&
             $connection->{SYSNAME} =~ /^SIP-(.*)$/ &&
             $deviceId =~ /^$1([0-9A-Fa-f]{12})$/) {
-            $connection->{SYSMAC} = lc(alt2canonical("0x".$1));
+            $connection->{SYSMAC} = alt2canonical("0x".$1);
         }
 
         # warning: multiple neighbors announcement for the same interface
@@ -1480,7 +1571,7 @@ sub _getVlans {
                     my $isTagged   = $isUntagged eq '0' ? $bEgress[$port_index] : '0';
                     push @{$results->{$port_id}}, {
                         NUMBER  => $vlan_id,
-                        NAME    => $name,
+                        NAME    => $name // '',
                         TAGGED  => $isTagged
                     } if $isTagged || $isUntagged;
                 }
@@ -1544,7 +1635,7 @@ sub _setTrunkPorts {
                 "invalid interface ID $port_id while setting trunk flag, " .
                 "aborting"
             ) if $logger;
-            last;
+            next;
         }
         $ports->{$port_id}->{TRUNK} = $trunk_ports->{$port_id};
     }

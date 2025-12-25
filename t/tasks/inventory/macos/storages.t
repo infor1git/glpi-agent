@@ -12,7 +12,7 @@ use English;
 
 use GLPI::Test::Inventory;
 use GLPI::Agent::Task::Inventory::MacOS::Storages;
-use GLPI::Agent::Tools 'getCanonicalSize';
+use GLPI::Agent::XML;
 
 my %testsSerialATA = (
     'SPSerialATADataType.xml' => [
@@ -40,6 +40,29 @@ my %testsSerialATA = (
             TYPE         => 'Disk drive',
             DESCRIPTION  => 'APPLE SSD SD0128F'
         }
+    ],
+    'SPSerialATADataType3.xml' => [
+        {
+            NAME         => 'VBOX CD-ROM',
+            MANUFACTURER => 'VBOX CD-ROM',
+            INTERFACE    => 'SATA',
+            SERIAL       => 'VB1-1a2b3c4d',
+            MODEL        => '',
+            FIRMWARE     => '1.0',
+            TYPE         => 'Disk drive',
+            DESCRIPTION  => 'VBOX CD-ROM'
+        },
+        {
+            NAME         => 'disk0',
+            MANUFACTURER => 'VBOX HARDDISK',
+            INTERFACE    => 'SATA',
+            SERIAL       => 'VB52cb5022-c69e4cc4',
+            MODEL        => '',
+            FIRMWARE     => '1.0',
+            DISKSIZE     => 40000,
+            TYPE         => 'Disk drive',
+            DESCRIPTION  => 'VBOX HARDDISK'
+        }
     ]
 );
 
@@ -54,7 +77,8 @@ my %testsDiscBurning = (
             TYPE         => 'Disk burning'
         }
     ],
-    'SPDiscBurningDataType2.xml' => []
+    'SPDiscBurningDataType2.xml' => [],
+    'SPDiscBurningDataType3.xml' => []
 );
 
 my %testsCardReader = (
@@ -85,7 +109,8 @@ my %testsCardReader = (
             DISKSIZE     => 15193,
             TYPE         => 'SD Card'
         }
-    ]
+    ],
+    'SPCardReaderDataType2.xml' => []
 );
 
 my %testsUSBStorage = (
@@ -218,7 +243,8 @@ my %testsUSBStorage = (
             INTERFACE    => 'USB',
             DISKSIZE     => 3819.52,
         }
-    ]
+    ],
+    'SPUSBDataType4.xml' => []
 );
 
 my %testsFireWireStorage = (
@@ -227,154 +253,91 @@ my %testsFireWireStorage = (
             NAME         => 'disk2',
             DESCRIPTION  => 'Target Disk Mode SBP-LUN',
             DISKSIZE     => 305244.16,
-            FIRMWARE     => '',
             INTERFACE    => '1394',
-            MANUFACTURER => 'AAPL',
-            MODEL        => '',
-            SERIAL       => '',
             TYPE         => 'Disk drive'
         }
-    ]
-);
-
-my %testsRecursiveParsing = (
-    'sample1.xml' => {
-        'ELEM_NAME1.1.1' => {
-            _name => 'ELEM_NAME1.1.1',
-            key1  => 'value1',
-            key2  => 'alternate value2',
-            key3  => 'value3',
-            key4  => 'value4',
-            key5  => 'value5',
-            key6  => 'value6',
-            key7  => 'value7',
-        },
-        'ELEM_NAME1.1.2' => {
-            _name => 'ELEM_NAME1.1.2',
-            key1  => 'value1',
-            key2  => 'alternate value2',
-            key3  => 'value3',
-            key4  => 'value4',
-            key5  => 'value5',
-            key6  => 'value6',
-            key7  => 'other value7',
-        },
-        'ELEM_NAME1.2' => {
-            _name => 'ELEM_NAME1.2',
-            key1  => 'value1',
-            key2  => 'value2',
-            key3  => 'value3',
-            key4  => 'value4',
-            key5  => 'other value5',
-            key6  => 'value6',
-        }
-    }
+    ],
+    'SPFireWireDataType2.xml' => []
 );
 
 my $nbTests = scalar (keys %testsSerialATA)
     + scalar (keys %testsDiscBurning)
     + scalar (keys %testsCardReader)
     + scalar (keys %testsUSBStorage)
-    + scalar (keys %testsFireWireStorage)
-    + scalar (keys %testsRecursiveParsing);
+    + scalar (keys %testsFireWireStorage);
 
-plan tests => 2 * $nbTests;
+plan tests => 2 * $nbTests + 1;
 
 my $inventory = GLPI::Test::Inventory->new();
 
-XML::XPath->require();
-my $checkXmlXPath = $EVAL_ERROR ? 0 : 1;
-SKIP: {
-    skip "test only if module XML::XPath available", 2*$nbTests unless $checkXmlXPath;
+foreach my $test (keys %testsSerialATA) {
+    my $file = "resources/macos/system_profiler/$test";
+    my @storages = GLPI::Agent::Task::Inventory::MacOS::Storages::_getSerialATAStorages(file => $file);
+    cmp_deeply(
+        [ sort { compare() } @storages ],
+        [ sort { compare() } @{$testsSerialATA{$test}} ],
+        "testsSerialATA $test: parsing"
+    );
+    lives_ok {
+        $inventory->addEntry(section => 'STORAGES', entry => $_)
+            foreach @storages;
+    } "$test: registering";
+}
 
-    foreach my $test (keys %testsSerialATA) {
-        my $file = "resources/macos/system_profiler/$test";
-        my @storages = GLPI::Agent::Task::Inventory::MacOS::Storages::_getSerialATAStorages(file => $file);
-        cmp_deeply(
-            [ sort { compare() } @storages ],
-            [ sort { compare() } @{$testsSerialATA{$test}} ],
-            "testsSerialATA $test: parsing"
-        );
-        lives_ok {
-            $inventory->addEntry(section => 'STORAGES', entry => $_)
-                foreach @storages;
-        } "$test: registering";
-    }
+foreach my $test (keys %testsDiscBurning) {
+    my $file = "resources/macos/system_profiler/$test";
+    my @storages = GLPI::Agent::Task::Inventory::MacOS::Storages::_getDiscBurningStorages(file => $file);
+    cmp_deeply(
+        [ sort { compare() } @storages ],
+        [ sort { compare() } @{$testsDiscBurning{$test}} ],
+        "testsDiscBurning $test: parsing"
+    );
+    lives_ok {
+        $inventory->addEntry(section => 'STORAGES', entry => $_)
+            foreach @storages;
+    } "$test: registering";
+}
 
-    foreach my $test (keys %testsDiscBurning) {
-        my $file = "resources/macos/system_profiler/$test";
-        my @storages = GLPI::Agent::Task::Inventory::MacOS::Storages::_getDiscBurningStorages(file => $file);
-        cmp_deeply(
-            [ sort { compare() } @storages ],
-            [ sort { compare() } @{$testsDiscBurning{$test}} ],
-            "testsDiscBurning $test: parsing"
-        );
-        lives_ok {
-            $inventory->addEntry(section => 'STORAGES', entry => $_)
-                foreach @storages;
-        } "$test: registering";
-    }
+foreach my $test (keys %testsCardReader) {
+    my $file = "resources/macos/system_profiler/$test";
+    my @storages = GLPI::Agent::Task::Inventory::MacOS::Storages::_getCardReaderStorages(file => $file);
+    cmp_deeply(
+        [ sort { compare() } @storages ],
+        [ sort { compare() } @{$testsCardReader{$test}} ],
+        "testsDiscBurning $test: parsing"
+    );
+    lives_ok {
+        $inventory->addEntry(section => 'STORAGES', entry => $_)
+            foreach @storages;
+    } "$test: registering";
+}
 
-    foreach my $test (keys %testsCardReader) {
-        my $file = "resources/macos/system_profiler/$test";
-        my @storages = GLPI::Agent::Task::Inventory::MacOS::Storages::_getCardReaderStorages(file => $file);
-        cmp_deeply(
-            [ sort { compare() } @storages ],
-            [ sort { compare() } @{$testsCardReader{$test}} ],
-            "testsDiscBurning $test: parsing"
-        );
-        lives_ok {
-            $inventory->addEntry(section => 'STORAGES', entry => $_)
-                foreach @storages;
-        } "$test: registering";
-    }
+foreach my $test (keys %testsUSBStorage) {
+    my $file = "resources/macos/system_profiler/$test";
+    my @storages = GLPI::Agent::Task::Inventory::MacOS::Storages::_getUSBStorages(file => $file);
+    cmp_deeply(
+        [ sort { compare() } @storages ],
+        [ sort { compare() } @{$testsUSBStorage{$test}} ],
+        "testsUSBStorage $test: parsing"
+    );
+    lives_ok {
+        $inventory->addEntry(section => 'STORAGES', entry => $_)
+            foreach @storages;
+    } "$test: registering";
+}
 
-    foreach my $test (keys %testsUSBStorage) {
-        my $file = "resources/macos/system_profiler/$test";
-        my @storages = GLPI::Agent::Task::Inventory::MacOS::Storages::_getUSBStorages(file => $file);
-        cmp_deeply(
-            [ sort { compare() } @storages ],
-            [ sort { compare() } @{$testsUSBStorage{$test}} ],
-            "testsUSBStorage $test: parsing"
-        );
-        lives_ok {
-            $inventory->addEntry(section => 'STORAGES', entry => $_)
-                foreach @storages;
-        } "$test: registering";
-    }
-
-    foreach my $test (keys %testsFireWireStorage) {
-        my $file = "resources/macos/system_profiler/$test";
-        my @storages = GLPI::Agent::Task::Inventory::MacOS::Storages::_getFireWireStorages(file => $file);
-        cmp_deeply(
-            [ sort { compare() } @storages ],
-            [ sort { compare() } @{$testsFireWireStorage{$test}} ],
-            "testsFireWireStorage $test: parsing"
-        );
-        lives_ok {
-            $inventory->addEntry(section => 'STORAGES', entry => $_)
-                foreach @storages;
-        } "$test: registering";
-    }
-
-    foreach my $test (keys %testsRecursiveParsing) {
-        my $file = "resources/macos/storages/$test";
-        my $xPathExpressions = [
-            "/root/elem",
-            "./key[text()='units']/following-sibling::array[1]/child::elem",
-            "./key[text()='units']/following-sibling::array[1]/child::elem"
-        ];
-        my $hash = {};
-        GLPI::Agent::Tools::MacOS::_initXmlParser(
-            file => $file
-        );
-        GLPI::Agent::Tools::MacOS::_recursiveParsing({}, $hash, undef, $xPathExpressions);
-        cmp_deeply(
-            $hash,
-            $testsRecursiveParsing{$test},
-            "testsRecursiveParsing $test: parsing"
-        );
-    }
+foreach my $test (keys %testsFireWireStorage) {
+    my $file = "resources/macos/system_profiler/$test";
+    my @storages = GLPI::Agent::Task::Inventory::MacOS::Storages::_getFireWireStorages(file => $file);
+    cmp_deeply(
+        [ sort { compare() } @storages ],
+        [ sort { compare() } @{$testsFireWireStorage{$test}} ],
+        "testsFireWireStorage $test: parsing"
+    );
+    lives_ok {
+        $inventory->addEntry(section => 'STORAGES', entry => $_)
+            foreach @storages;
+    } "$test: registering";
 }
 
 sub compare {

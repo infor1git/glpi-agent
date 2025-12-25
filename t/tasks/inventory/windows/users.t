@@ -3,8 +3,7 @@
 use strict;
 use warnings;
 use lib 't/lib';
-#use utf8;
-use Encode;
+use Encode qw(decode encode);
 
 use English qw(-no_match_vars);
 use Test::Deep;
@@ -32,12 +31,17 @@ GLPI::Agent::Task::Inventory::Win32::Users->require();
 
 my %tests = (
     '7-AD' => {
-       LOGIN  => 'teclib',
-       DOMAIN => 'AD'
+        LOGIN  => 'teclib',
+        DOMAIN => 'AD'
     },
     '10-StandAlone' => {
-       LOGIN  => 'teclib',
-       DOMAIN => 'XPS-FUSIONINVEN'
+        LOGIN  => 'teclib',
+        DOMAIN => 'XPS-FUSIONINVEN'
+    },
+    '11-AzureAD' => {
+        LOGIN     => 'johndoe',
+        DOMAIN    => 'nowhere.org',
+        _fullname => 'JohnDoe@AzureAD'
     },
 );
 
@@ -47,30 +51,13 @@ my $module = Test::MockModule->new(
     'GLPI::Agent::Task::Inventory::Win32::Users'
 );
 
-$module->mock(
-    'encodeFromRegistry',
-    sub {
-        return undef unless $_[0];
-        return encode("UTF-8", decode('cp1252', $_[0]));
-    }
-);
-
 my $tools_module = Test::MockModule->new(
     'GLPI::Agent::Tools::Win32'
 );
 
-# Variant of sub mockGetRegistryKey fo
-sub mock_GetRegistryKey {
-    my ($test) = @_;
-
-    return sub {
-        my (%params) = @_;
-
-        my $last_elt = (split(/\//, $params{keyName}))[-1];
-        my $file = "resources/win32/registry/$test-$last_elt.reg";
-        return loadRegistryDump($file);
-    };
-}
+my $users_module = Test::MockModule->new(
+    'GLPI::Agent::Tools::Win32::Users'
+);
 
 foreach my $test (keys %tests) {
 
@@ -84,8 +71,11 @@ foreach my $test (keys %tests) {
         mockGetWMIObjects($test)
     );
 
-    #my $preloaded_hkey = loadRegistryDump("resources/win32/registry/$test.reg");
-#use Data::Dumper ; print STDERR "HKEY: ",Dumper($preloaded_hkey);
+    $users_module->mock(
+        'getWMIObjects',
+        mockGetWMIObjects($test)
+    );
+
     my $user = GLPI::Agent::Task::Inventory::Win32::Users::_getLastUser();
 
     cmp_deeply(

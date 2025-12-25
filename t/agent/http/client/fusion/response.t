@@ -4,7 +4,6 @@ use strict;
 use warnings;
 use lib 't/lib';
 
-use JSON::PP;
 use English qw(-no_match_vars);
 use Test::Deep;
 use Test::Exception;
@@ -130,7 +129,7 @@ subtest "unexpected content" => sub {
             }
         ),
         $logger,
-        "[http client] Can't decode JSON content, starting with $html_content",
+        "[http client] Can't decode JSON content, starting with: $html_content",
     );
 };
 

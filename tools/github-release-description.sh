@@ -71,6 +71,9 @@ Linux installer for redhat/centos/debian/ubuntu with also snap install support|S
 ### Snap package for amd64
 [glpi-agent_${VERSION}_amd64.snap]($REPO/releases/download/$TAG/glpi-agent_${VERSION}_amd64.snap)
 
+### AppImage Linux installer for x86-64
+[glpi-agent-${VERSION}-x86_64.AppImage]($REPO/releases/download/$TAG/glpi-agent-${VERSION}-x86_64.AppImage)
+
 ### Debian/Ubuntu packages
 Better use [glpi-agent-${VERSION}-linux-installer.pl]($REPO/releases/download/$TAG/glpi-agent-${VERSION}-linux-installer.pl) when possible.
 Related agent task |Package
@@ -92,4 +95,8 @@ Collect | [glpi-agent-task-collect-${VERSION}${RPMREV}.noarch.rpm]($REPO/release
 Deploy | [glpi-agent-task-deploy-${VERSION}${RPMREV}.noarch.rpm]($REPO/releases/download/$TAG/glpi-agent-task-deploy-${VERSION}${RPMREV}.noarch.rpm)
 WakeOnLan | [glpi-agent-task-wakeonlan-${VERSION}${RPMREV}.noarch.rpm]($REPO/releases/download/$TAG/glpi-agent-task-wakeonlan-${VERSION}${RPMREV}.noarch.rpm)
 Cron | [glpi-agent-cron-${VERSION}${RPMREV}.noarch.rpm]($REPO/releases/download/$TAG/glpi-agent-cron-${VERSION}${RPMREV}.noarch.rpm)
+
+## Sources
+[GLPI-Agent-${VERSION}.tar.gz]($REPO/releases/download/$TAG/GLPI-Agent-${VERSION}.tar.gz)
+
 DESCRIPTION

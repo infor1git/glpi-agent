@@ -28,13 +28,18 @@ my @options = (
     'logfile=s',
     'no-httpd',
     'no-ssl-check',
+    'no-category=s',
     'no-compression|C',
     'no-task=s',
     'no-p2p',
+    'password|p=s',
+    'proxy|P=s',
     'httpd-ip=s',
     'httpd-port=s',
     'httpd-trust=s',
     'reinstall',
+    'remote=s',
+    'remote-workers=i',
     'runnow',
     'scan-homedirs',
     'scan-profiles',
@@ -43,11 +48,14 @@ my @options = (
     'silent|S',
     'skip=s',
     'snap',
+    'ssl-fingerprint=s',
     'tag|t=s',
     'tasks=s',
     'type=s',
     'uninstall',
     'unpack',
+    'user|u=s',
+    'use-current-user-proxy',
     'verbose|v',
     'version',
 );
@@ -121,14 +129,25 @@ glpi-agent-linux-installer [options]
     --backend-collect-timeout=TIME set timeout for inventory modules execution (30)
     -t --tag=TAG                   configure tag to define in inventories
 
+  RemoteInventory specific options:
+    --remote=REMOTE[,REMOTE]...    list of remotes for remoteinventory task
+    --remote-workers=COUNT         maximum number of workers for remoteinventory task
+
   Package deployment task specific options:
     --no-p2p                       set to not use peer to peer to download
                                    deploy task packages
 
   Network options:
+    -P --proxy=PROXY               proxy address
+    --use-current-user-proxy       Configure proxy address from current user environment (false)
+                                   and only if --proxy option is not used
     --ca-cert-file=FILE            CA certificates file
     --no-ssl-check                 do not check server SSL certificate (false)
     -C --no-compression            do not compress communication with server (false)
+    --ssl-fingerprint=FINGERPRINT  Trust server certificate if its SSL fingerprint
+                                   matches the given one
+    -u --user=USER                 user name for server authentication
+    -p --password=PASSWORD         password for server authentication
 
   Web interface options:
     --no-httpd                     disable embedded web server (false)

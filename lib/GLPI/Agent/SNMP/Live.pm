@@ -4,7 +4,6 @@ use strict;
 use warnings;
 use parent 'GLPI::Agent::SNMP';
 
-use Encode qw(encode);
 use English qw(-no_match_vars);
 use Net::SNMP;
 use Net::SNMP qw/SNMP_PORT/;
@@ -58,6 +57,8 @@ sub new {
             if $error =~ /^No response from remote host/;
         die "authentication error on host $params{hostname}\n"
             if $error =~ /^Received usmStats(WrongDigests|UnknownUserNames)/;
+        die "Crypt::Rijndael perl module needs to be installed\n"
+            if $error =~ /Required module Crypt\/Rijndael\.pm not found/;
         die $error . "\n";
     }
 
@@ -120,7 +121,7 @@ sub reset_original_context {
                              undef   ;
 
     if ($version eq 'snmpv3') {
-        delete $self->{context};
+        $self->{context} = "";
     } else {
         $self->{session} = $self->{oldsession};
         delete $self->{oldsession};
@@ -134,7 +135,7 @@ sub get {
 
     my $session = $self->{session};
     my %options = (-varbindlist => [$oid]);
-    $options{'-contextname'} = $self->{context} if $self->{context};
+    $options{'-contextname'} = $self->{context} if defined($self->{context});
 
     my $response = $session->get_request(%options);
 
@@ -157,7 +158,7 @@ sub walk {
 
     my $session = $self->{session};
     my %options = (-baseoid => $oid);
-    $options{'-contextname'}    = $self->{context} if $self->{context};
+    $options{'-contextname'}    = $self->{context} if defined($self->{context});
     $options{'-maxrepetitions'} = 1                if $session->version() != 0;
 
     my $response = $session->get_table(%options);

@@ -5,6 +5,8 @@ use warnings;
 
 use parent 'GLPI::Agent::Task::Inventory::Module';
 
+use UNIVERSAL::require;
+
 use GLPI::Agent::Tools;
 
 use constant    category    => "software";
@@ -41,28 +43,45 @@ sub _parse_pkgs {
         }
     }
 
-    my $handle = getFileHandle(%params);
-    return unless $handle;
+    my @lines = getAllLines(%params)
+        or return;
 
     my @softwares;
     my $software;
     if ($params{command} =~ /pkg info/) {
-        while (my $line = <$handle>) {
+        foreach my $line (@lines) {
             if ($line =~ /^\s*$/) {
                 push @softwares, $software if $software;
                 undef $software;
             } elsif ($line =~ /Name:\s+(.+)/) {
                 $software->{NAME} = $1;
-            } elsif ($line =~ /FMRI:\s+.+\@(.+)/) {
+            } elsif ($line =~ /Version:\s+(.+)/ ) {
+                $software->{VERSION} = $1;
+            } elsif ($line =~ /FMRI:\s+.+\@(.+)/ && !$software->{VERSION}) {
                 $software->{VERSION} = $1;
             } elsif ($line =~ /Publisher:\s+(.+)/) {
                 $software->{PUBLISHER} = $1;
-            } elsif ($line =~  /Summary:\s+(.+)/) {
+            } elsif ($line =~ /Summary:\s+(.+)/) {
                 $software->{COMMENTS} = $1;
+            } elsif ($line =~ /Last Install Time:\s+\S+\s+(\S+)\s+(\d+)\s+\S+\s+(\d+)$/) {
+                if (DateTime->require) {
+                    my $date;
+                    eval {
+                        $date = DateTime->new(
+                            month   => month($1),
+                            day     => $2,
+                            year    => $3,
+                        );
+                    };
+                    $software->{INSTALLDATE} = $date->dmy('/') if $date;
+                }
+            } elsif ($line =~ /Size:\s+(.+)$/) {
+                my $size = getCanonicalSize($1, 1024);
+                $software->{FILESIZE} = int($size) if defined($size);
             }
         }
     } else {
-        while (my $line = <$handle>) {
+        foreach my $line (@lines) {
             if ($line =~ /^\s*$/) {
                 push @softwares, $software if $software;
                 undef $software;
@@ -72,15 +91,26 @@ sub _parse_pkgs {
                 $software->{VERSION} = $1;
             } elsif ($line =~ /VENDOR:\s+(.+)/) {
                 $software->{PUBLISHER} = $1;
-            } elsif ($line =~  /DESC:\s+(.+)/) {
+            } elsif ($line =~ /DESC:\s+(.+)/) {
                 $software->{COMMENTS} = $1;
+            } elsif ($line =~ /INSTDATE:\s+(\S+)\s+(\d+)\s+(\d+)/) {
+                if (DateTime->require) {
+                    my $date;
+                    eval {
+                        $date = DateTime->new(
+                            month   => month($1),
+                            day     => $2,
+                            year    => $3,
+                        );
+                    };
+                    $software->{INSTALLDATE} = $date->dmy('/') if $date;
+                }
             }
         }
     }
 
     push @softwares, $software if $software;
 
-    close $handle;
     return \@softwares;
 }
 

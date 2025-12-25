@@ -8,7 +8,7 @@ use parent 'GLPI::Agent::Task::Inventory::Module';
 use GLPI::Agent::Tools;
 use GLPI::Agent::Tools::Batteries;
 
-# Run after virtualization to decide if found component is virtual
+# Define some kind of priority so we can update batteries inventory
 our $runAfterIfEnabled = [ qw(
     GLPI::Agent::Task::Inventory::Generic::Dmidecode::Battery
     GLPI::Agent::Task::Inventory::Generic::Batteries::Acpiconf
@@ -16,7 +16,7 @@ our $runAfterIfEnabled = [ qw(
 )];
 
 sub isEnabled {
-    return glob "/sys/class/power_supply/*/capacity";
+    return Glob("/sys/class/power_supply/*/capacity");
 }
 
 sub doInventory {
@@ -50,7 +50,7 @@ sub _getBatteriesFromSysClass {
     my (%params) = @_;
 
     my @batteries = ();
-    foreach my $psu (glob "/sys/class/power_supply/*") {
+    foreach my $psu (Glob("/sys/class/power_supply/*")) {
         my $type = getFirstLine(file => "$psu/type")
             or next;
         my $present = getFirstLine(file => "$psu/present")
@@ -71,9 +71,9 @@ sub _getBatteryFromSysClass {
     my (%params) = @_;
 
     my $battery = {
-        NAME            => getFirstLine(file => "$params{psu}/model_name"),
-        CHEMISTRY       => getFirstLine(file => "$params{psu}/technology"),
-        SERIAL          => sanitizeBatterySerial(getFirstLine(file => "$params{psu}/serial_number")),
+        NAME            => getFirstLine(file => "$params{psu}/model_name") // '',
+        CHEMISTRY       => getFirstLine(file => "$params{psu}/technology") // '',
+        SERIAL          => sanitizeBatterySerial(getFirstLine(file => "$params{psu}/serial_number")) // '',
     };
 
     my $manufacturer = getFirstLine(file => "$params{psu}/manufacturer");

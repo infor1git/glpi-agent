@@ -10,8 +10,10 @@ use MIME::Base64;
 use UNIVERSAL::require;
 
 use File::Find;
+use File::Basename;
 use GLPI::Agent::Tools;
 use GLPI::Agent::Tools::Screen;
+use GLPI::Agent::Tools::Generic;
 
 use constant    category    => "monitor";
 
@@ -110,7 +112,7 @@ sub _getScreensFromWindows {
         next unless $object->{InstanceName};
         next unless $object->{Active};
 
-        $object->{InstanceName} =~ s/_\d+//;
+        $object->{InstanceName} =~ s/_\d+$//;
         my $screen = {
             id => $object->{InstanceName}
         };
@@ -140,7 +142,6 @@ sub _getScreensFromWindows {
         push @screens, {
             id           => $object->{PNPDeviceID},
             NAME         => $object->{Caption},
-            TYPE         => $object->{MonitorType},
             MANUFACTURER => $object->{MonitorManufacturer},
             CAPTION      => $object->{Caption}
         };
@@ -195,9 +196,9 @@ sub _getScreensFromUnix {
                 {
                     no_chdir => 1,
                     wanted   => sub {
-                        return unless $_ eq 'edid';
-                        return unless has_file($File::Find::name);
-                        my $edid = getAllLines(file => $File::Find::name);
+                        return unless basename($_) eq 'edid';
+                        return unless canRead($_);
+                        my $edid = getAllLines(file => $_);
                         push @screens, { edid => $edid } if $edid;
                     },
                 },
@@ -290,6 +291,12 @@ sub _getScreensFromMacOS {
         logger  => $logger,
     );
 
+    push @displays, GLPI::Agent::Tools::MacOS::getIODevices(
+        class   => 'AppleCLCD2',
+        options => '-r -lw0 -d 1',
+        logger  => $logger,
+    );
+
     foreach my $display (@displays) {
         my $screen = {};
         if ($display->{IODisplayCapabilityString} && $display->{IODisplayCapabilityString} =~ /model\((.*)\)/) {
@@ -297,9 +304,19 @@ sub _getScreensFromMacOS {
         }
         if ($display->{IODisplayEDID} && $display->{IODisplayEDID} =~ /^[0-9a-f]+$/i
           && (length($display->{IODisplayEDID}) == 256 || length($display->{IODisplayEDID}) == 512)) {
-            $screen->{edid} = pack("H*", $display->{IODisplayEDID})
+            $screen->{edid} = pack("H*", $display->{IODisplayEDID});
         }
-        push @screens, $screen;
+        if ($display->{DisplayAttributes} && ref($display->{DisplayAttributes}) eq 'HASH' && ref($display->{DisplayAttributes}->{ProductAttributes}) eq 'HASH') {
+            my $attributes = $display->{DisplayAttributes}->{ProductAttributes};
+            $screen->{CAPTION} = $attributes->{ProductName} if $attributes->{ProductName};
+            $screen->{SERIAL} = $attributes->{AlphanumericSerialNumber} if $attributes->{AlphanumericSerialNumber};
+            $screen->{ALTSERIAL} = $attributes->{SerialNumber} if $attributes->{SerialNumber};
+            $screen->{MANUFACTURER} = getEDIDVendor(id => $attributes->{ManufacturerID}) || $attributes->{ManufacturerID}
+                if $attributes->{ManufacturerID};
+            $screen->{DESCRIPTION} = $attributes->{WeekOfManufacture}."/".$attributes->{YearOfManufacture}
+                if $attributes->{WeekOfManufacture} && $attributes->{YearOfManufacture};
+        }
+        push @screens, $screen if keys(%{$screen});
     }
 
     return @screens if @screens;

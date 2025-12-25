@@ -6,9 +6,9 @@ use warnings;
 use parent 'GLPI::Agent::Task::Inventory::Module';
 
 use English qw(-no_match_vars);
-use XML::TreePP;
 
 use GLPI::Agent::Tools;
+use GLPI::Agent::XML;
 
 sub isEnabled {
     return canRun('virsh');
@@ -63,11 +63,11 @@ sub _getMachines {
 sub _parseList {
     my (%params) = @_;
 
-    my $handle = getFileHandle(%params);
-    return unless $handle;
+    my @lines = getAllLines(%params)
+        or return;
 
     my @machines;
-    while (my $line = <$handle>) {
+    foreach my $line (@lines) {
         next if $line =~ /^\s*Id/;
         next if $line =~ /^-{5}/;
         next unless $line =~ /^\s*(\d+|)(\-|)\s+(\S+)\s+(\S.+)/;
@@ -88,7 +88,6 @@ sub _parseList {
 
         push @machines, $machine;
     }
-    close $handle;
 
     return @machines;
 }
@@ -114,7 +113,7 @@ sub _parseDumpxml {
 
     my $data;
     eval {
-        $data = XML::TreePP->new()->parse($xml);
+        $data = GLPI::Agent::XML->new(string => $xml)->dump_as_hash();
     };
     if ($EVAL_ERROR) {
         $params{logger}->error("Failed to parse XML output");

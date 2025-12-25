@@ -9,14 +9,16 @@ use English qw(-no_match_vars);
 use Encode qw(encode);
 use HTML::Entities;
 use File::stat;
-use XML::TreePP;
 
 use GLPI::Agent::Logger;
 use GLPI::Agent::Tools;
+use GLPI::Agent::XML;
 
 use GLPI::Agent::HTTP::Server::ToolBox::Results::Device;
 
 use constant    results => "results";
+
+use constant    need_init   => 1;
 
 sub index {
     return results;
@@ -39,7 +41,6 @@ sub new {
         _mtime      => {},
         _macs       => {},
         _devices    => {},
-        need_init   => 1,
     };
 
     bless $self, $class;
@@ -78,6 +79,7 @@ sub yaml_config_specs {
             value       => $yaml_config->{'default_columns'} || 'name|mac|ip|serial|tag|source|type',
             text        => "Defaut columns for results list view",
             tips        => "Ordered columns list separated by pipes\n(default=name|mac|ip|serial|tag|source|type)",
+            only_if     => $self->isyes($yaml_config->{'results_navbar'}),
         },
         results_navbar  => {
             category    => "Navigation bar",
@@ -86,6 +88,7 @@ sub yaml_config_specs {
             text        => "Show Results in navigation bar",
             navbar      => "Results",
             link        => $self->index(),
+            icon        => "report",
             index       => 20, # index in navbar
         },
         custom_fields_yaml => {
@@ -96,6 +99,7 @@ sub yaml_config_specs {
             options     => $self->yaml_files(),
             text        => "Custom fields YAML file",
             yaml_base   => 'container',
+            only_if     => $self->isyes($yaml_config->{'results_navbar'}),
         },
         archive_format  => {
             category    => "Results",
@@ -103,6 +107,7 @@ sub yaml_config_specs {
             value       => $yaml_config->{'archive_format'} || $self->_supported_archive_formats()->[0],
             options     => $self->_supported_archive_formats(),
             text        => "Exported archive format",
+            only_if     => $self->isyes($yaml_config->{'results_navbar'}),
         },
         other_fields    => {
             category    => "Results",
@@ -126,6 +131,7 @@ sub yaml_config_specs {
                             NODE can match on any kind of XML
                             NODE path is expect to be under the first 'REQUEST' node
                             As examples, 'DEVICEID' and 'CONTENT,VERSIONCLIENT' are valid paths",
+            only_if     => $self->isyes($yaml_config->{'results_navbar'}),
         }
     };
 }
@@ -168,9 +174,8 @@ sub xml_analysis {
         # Don't reload file if still loaded and has not been updated
         next if $self->{_mtime}->{$file} && $self->{_mtime}->{$file} == $mtime;
 
-        my $tpp = XML::TreePP->new(utf8_flag => 1);
-        my $tree =$tpp->parsefile($file);
-        next unless $tree;
+        my $tree = GLPI::Agent::XML->new(file => $file)->dump_as_hash()
+            or next;
 
         $self->{_mtime}->{$file} = $mtime;
 
@@ -291,7 +296,6 @@ sub update_template_hash {
                 next if !$device->type && $section->{match} eq 'COMPUTER';
                 next if $device->type !~ $re_match;
             }
-            $hash->{need_datetime} += scalar(grep { $_->{type} =~ /^date/ } values(%{$section->{fields}}));
             push @{$hash->{sections}}, $section;
         }
         $hash->{checked_fields} = $self->get_from_session('checked_fields');
@@ -343,30 +347,31 @@ sub handle_form {
 
     my $device;
     if (my $edit = $self->edit()) {
-        $device = $self->{_devices}->{$edit};
-        # Check Source for the entry is NetDiscovery or Edition
-        if ($device->source =~ /^NetDiscovery|Edition$/) {
-            $self->{_do} = 'edit';
-        } elsif ($device->source =~ /^Local|NetInventory$/) {
-            if ($device->source eq 'NetInventory' && $device->type !~ /^NETWORKING|PRINTER|STORAGE$/) {
-                # First we fix noedit for values provided by NetInventory
-                foreach my $key ($device->noedit()) {
-                    next if $device->noedit($key);
-                    next unless length($device->get($key));
-                    $device->dontedit($key);
+        if ($device = $self->{_devices}->{$edit}) {
+            # Check Source for the entry is NetDiscovery or Edition
+            if ($device->source =~ /^NetDiscovery|Edition$/) {
+                $self->{_do} = 'edit';
+            } elsif ($device->source =~ /^Local|NetInventory$/) {
+                if ($device->source eq 'NetInventory' && $device->type !~ /^NETWORKING|PRINTER|STORAGE$/) {
+                    # First we fix noedit for values provided by NetInventory
+                    foreach my $key ($device->noedit()) {
+                        next if $device->noedit($key);
+                        next unless length($device->get($key));
+                        $device->dontedit($key);
+                    }
+                    # Then permit to change type as it won't be supported on server side
+                    $device->editfield('type');
+                    # Finally, this can permit to also fix serial or even mac when also not found by netdiscovery
+                } else {
+                    # Only custom fields can be edited
+                    foreach my $key ($device->noedit()) {
+                        next if $device->noedit($key);
+                        next if $key =~ m|^custom/|;
+                        $device->dontedit($key);
+                    }
                 }
-                # Then permit to change type as it won't be supported on server side
-                $device->editfield('type');
-                # Finally, this can permit to also fix serial or even mac when also not found by netdiscovery
-            } else {
-                # Only custom fields can be edited
-                foreach my $key ($device->noedit()) {
-                    next if $device->noedit($key);
-                    next if $key =~ m|^custom/|;
-                    $device->dontedit($key);
-                }
+                $self->{_do} = (grep { not $device->noedit($_) } $device->noedit()) ? 'edit' : '';
             }
-            $self->{_do} = (grep { not $device->noedit($_) } $device->noedit()) ? 'edit' : '';
         }
     }
 
@@ -385,6 +390,8 @@ sub handle_form {
             : ();
         foreach my $field (@fields_update) {
             next if $device->noedit($field);
+            # Fix date time format submitted by datetime-local input to match our required format
+            $form->{"edit/$field"} = "$1 $2" if $form->{"edit/$field"} =~ /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})$/;
             next if $device->get($field) eq $form->{"edit/$field"};
             $device->set($field => $form->{"edit/$field"});
             $changes++;
@@ -397,9 +404,10 @@ sub handle_form {
             next if $device->isLocalInventory();
             my $inventory = $self->page('inventory')
                 or next;
-            my $netscan = $inventory->netscan($device->get('ip_range'), $device->ip);
+            my $netscan = $inventory->netscan("", [$device->get('ip_range')], $device->ip);
             $self->{tasks}->{$device->ip} = $inventory->{tasks}->{$netscan};
         }
+        return if $self->errors();
         $self->send_redirect('inventory')
             unless $self->edit();
     } elsif ($form->{'submit/delete-device'}) {
@@ -513,7 +521,6 @@ sub _save_inventory {
 
     return unless $device && $device->ip;
 
-    my ($tpp, $xml);
     my $yaml_config = $self->yaml('configuration') || {};
     my $kind_base = $device->isLocalInventory ? 'inventory' : 'netinventory';
     my $file;
@@ -525,9 +532,9 @@ sub _save_inventory {
         $file .= ".xml";
     }
 
+    my $xml;
     if (-e $file) {
-        my $tpp = XML::TreePP->new(utf8_flag => 1);
-        $xml =$tpp->parsefile($file);
+        $xml = GLPI::Agent::XML->new(file => $file)->dump_as_hash();
     } else {
         # Without existing inventory we suppose this is a new netinventory
         $xml = {
@@ -579,17 +586,8 @@ sub _save_inventory {
         $source->update_xml($xml, $device);
     }
 
-    unless ($tpp) {
-        $tpp = XML::TreePP->new(
-            first_out               => [ qw(CONTENT DEVICE) ],
-            last_out                => [ 'QUERY' ],
-            ignore_error            => 1,
-            indent                  => 2,
-            empty_element_tag_end   => ' />',
-        );
-    }
     $self->info("Saving updated $kind_base: $file");
-    $tpp->writefile($file, $xml, 'UTF-8');
+    GLPI::Agent::XML->new()->writefile($file, $xml);
 }
 
 sub _register_supported_modules {

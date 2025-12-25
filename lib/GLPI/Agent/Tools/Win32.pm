@@ -14,6 +14,7 @@ use Thread::Semaphore;
 use UNIVERSAL::require();
 use MIME::Base64;
 use Encode;
+use File::Temp;
 
 use constant KEY_WOW64_64 => 0x100;
 use constant KEY_WOW64_32 => 0x200;
@@ -25,7 +26,8 @@ use constant KEY_READ     => 0x20019;
 ################################################################################
 BEGIN {
     use English qw(-no_match_vars);
-    if ($OSNAME ne 'MSWin32') {
+    # Fake Win32 module loading unless under testing with our oab fakes modules
+    if ($OSNAME ne 'MSWin32' && ! grep { $_ =~ qr{t/lib/fake/windows} } @INC) {
         $INC{'Win32/Job.pm'} = "-";
         $INC{'Win32/TieRegistry.pm'} = "-";
     }
@@ -35,7 +37,6 @@ our $Registry;
 ################################################################################
 
 use Cwd;
-use Encode;
 use English qw(-no_match_vars);
 use File::Temp qw(:seekable tempfile);
 use File::Basename qw(basename);
@@ -54,12 +55,12 @@ my $localCodepage;
 
 our @EXPORT = qw(
     is64bit
-    encodeFromRegistry
     KEY_WOW64_64
     KEY_WOW64_32
     getInterfaces
     getRegistryValue
     getRegistryKey
+    getRegistryKeyValue
     getWMIObjects
     getLocalCodepage
     runCommand
@@ -97,20 +98,6 @@ sub getLocalCodepage {
     return $localCodepage;
 }
 
-sub encodeFromRegistry {
-    my ($string) = @_;
-
-    ## no critic (ExplicitReturnUndef)
-    return undef unless $string;
-
-    return $string if Encode::is_utf8($string);
-
-    # Don't re-encode while using winrm
-    return $string if $GLPI::Agent::Tools::remote;
-
-    return decode(getLocalCodepage(), $string);
-}
-
 sub getWMIObjects {
 
     my $remote = $GLPI::Agent::Tools::remote;
@@ -122,7 +109,7 @@ sub getWMIObjects {
         args  => \@_
     };
 
-    return _call_win32_ole_dependent_api($win32_ole_dependent_api);
+    return call_not_thread_safe_api_on_win32($win32_ole_dependent_api);
 }
 
 sub _getWMIObjects {
@@ -277,12 +264,42 @@ sub getRegistryValue {
         my %ret;
         foreach (grep { m|^/| } keys %$key) {
             s{^/}{};
-            $ret{$_} = $params{withtype} ? [$key->GetValue($_)] : $key->{"/$_"} ;
+            $ret{$_} = getRegistryKeyValue($key, $_, $params{withtype});
         }
         return \%ret;
     } else {
-        return $params{withtype} ? [$key->GetValue($valueName)] : $key->{"/$valueName"} ;
+        return getRegistryKeyValue($key, $valueName, $params{withtype});
     }
+}
+
+sub getRegistryKeyValue {
+    my ($key, $valueName, $withType) = @_;
+
+    # Required for RemoteInventory or tests
+    return $withType ? [ $key->{"/$valueName"}, $key->{"/$valueName"} =~ /^0x/ ? 4 : 1 ] : $key->{"/$valueName"}
+        if $GLPI::Agent::Tools::remote || !Win32API::Registry->require();
+
+    my ($valType, $valData, $dLen) = (0, "", 0);
+
+    my $valueNameW = encode("UTF16-LE", $valueName);
+
+    Win32API::Registry::RegQueryValueExW($key->Handle, $valueNameW, [], $valType, $valData, $dLen)
+        # Only really required for tests
+        or return $withType ? [ $key->{"/$valueName"}, $key->{"/$valueName"} =~ /^0x/ ? 4 : 1 ] : $key->{"/$valueName"};
+
+    # Only REG_SZ really needs to be handled in our context
+    my $value;
+    if ($valType eq Win32::TieRegistry::REG_SZ() || $valType eq Win32::TieRegistry::REG_EXPAND_SZ()) {
+        substr($valData, -1) = "" if substr($valData,-1) eq "\0";
+        $value = decode("UTF16-LE", $valData);
+    } elsif ($valType eq Win32::TieRegistry::REG_MULTI_SZ()) {
+        substr($valData, -1) = "" if substr($valData,-1) eq "\0";
+        $value = [ map { decode("UTF16-LE", $_) } split (/\0/, $valData) ];
+    } else {
+        $value = $key->{"/$valueName"};
+    }
+
+    return $withType ? [ $value, $valType ] : $value;
 }
 
 sub _getRegistryValueFromWMI {
@@ -474,10 +491,10 @@ sub _getRegistryDynamic {
             if ($valueName eq '*') {
                 foreach (grep { m|^/| } keys %$key) {
                     s{^/}{};
-                    $ret{$sub.$second."/".$_} = $params{withtype} ? [$key->GetValue($_)] : $key->{"/$_"} ;
+                    $ret{$sub.$second."/".$_} = getRegistryKeyValue($key, $_, $params{withtype});
                 }
             } elsif (exists($key->{"/$valueName"})) {
-                $ret{$sub.$second."/".$valueName} = $params{withtype} ? [$key->GetValue($valueName)] : $key->{"/$valueName"} ;
+                $ret{$sub.$second."/".$valueName} = getRegistryKeyValue($key, $valueName, $params{withtype});
             }
         }
     }
@@ -536,13 +553,24 @@ sub runCommand {
 sub runPowerShell {
     my (%params) = @_;
 
+    my $remote = $GLPI::Agent::Tools::remote;
+
     my $script = delete $params{script}
         or return;
 
-    my $encodedScript = encode_base64(encode("UTF16-LE", $script), "");
+    return $remote->runPowerShell(script => $script) if $remote;
 
-    return map { decode("UTF-8", $_) } getAllLines(
-        command => "powershell -NonInteractive -ExecutionPolicy Unrestricted -encodedCommand $encodedScript",
+    my $fh = File::Temp->new(
+        TEMPLATE    => 'get-appxpackage-XXXXXX',
+        SUFFIX      => '.ps1'
+    );
+    print $fh $script;
+    close( $fh);
+    my $file = $fh->filename;
+    return unless $file && -f $file;
+
+    return map { my $line = $_ ; $line =~ s/\r$//; decode("UTF-8", $line) } getAllLines(
+        command => "powershell -NonInteractive -ExecutionPolicy Unrestricted -File $file",
         %params
     );
 }
@@ -557,7 +585,7 @@ sub getInterfaces {
         properties => [ qw/
             Index InterfaceIndex Description IPEnabled DHCPServer MACAddress MTU
             DefaultIPGateway DNSServerSearchOrder IPAddress IPSubnet
-            DNSDomain
+            DNSDomain SettingID
             /
         ]
     )) {
@@ -568,6 +596,7 @@ sub getInterfaces {
             IPDHCP      => $object->{DHCPServer},
             MACADDR     => $object->{MACAddress},
             MTU         => $object->{MTU},
+            GUID        => $object->{SettingID},
             DNSDomain   => $object->{DNSDomain}
         };
 
@@ -604,7 +633,7 @@ sub getInterfaces {
     my @networkAdapter = getWMIObjects(
         moniker    => 'winmgmts://./root/StandardCimv2',
         class      => 'MSFT_NetAdapter',
-        properties => [ qw/InterfaceIndex PnPDeviceID Speed HardwareInterface InterfaceGuid InterfaceDescription/ ]
+        properties => [ qw/InterfaceIndex PnPDeviceID Speed HardwareInterface InterfaceGuid InterfaceDescription InterfaceType/ ]
     );
 
     if (!@networkAdapter) {
@@ -624,6 +653,46 @@ sub getInterfaces {
         ) or next;
 
         push @interfaces, $netAdapter->getInterfaces();
+    }
+
+    # Also try to include connected vpn
+    my $count = 0;
+    my $interfaces = getRegistryKey(
+        path => 'HKEY_LOCAL_MACHINE/SYSTEM/CurrentControlSet/services/Tcpip/Parameters/Interfaces',
+        # Important for remote inventory optimization
+        required    => [ qw/DhcpIPAddress DhcpSubnetMask VPNInterface/ ],
+    );
+    foreach my $interface (keys(%{$interfaces})) {
+        my ($guid) = $interface =~ m{^(\{........-....-....-....-............\})/$}
+            or next;
+        next unless $interfaces->{$interface}->{VPNInterface};
+        # This vpn interface is still well-known
+        next if grep { $_->{GUID} && uc($_->{GUID}) eq uc($guid) } @configurations;
+        my $vpn = {
+            DESCRIPTION => "vpn".$count,
+            TYPE        => "ethernet",
+            VIRTUALDEV  => 1,
+            STATUS      => "up"
+        };
+        my $ip = $interfaces->{$interface}->{DhcpIPAddress}
+            or next;
+        # Skip vpn if not running
+        next if $ip eq '0.0.0.0';
+        $vpn->{IPADDRESS} = $ip;
+        $vpn->{IPMASK} = $interfaces->{$interface}->{DhcpSubnetMask}
+            if $interfaces->{$interface}->{DhcpSubnetMask};
+
+        # Also try to update vpn name but we may not have access to it if not in the right context
+        my ($vpnConnection) = getWMIObjects(
+            moniker    => 'winmgmts:{impersonationLevel=impersonate,(security)}!//./Root/Microsoft/Windows/RemoteAccess/Client',
+            query      => "SELECT * FROM PS_VpnConnection WHERE Guid = '".uc($guid)."' OR Guid = '".lc($guid)."'",
+            properties => [ qw/Name/ ]
+        );
+        $vpn->{DESCRIPTION} = $vpnConnection->{Name}
+            if $vpnConnection && $vpnConnection->{Name};
+
+        push @interfaces, $vpn;
+        $count++;
     }
 
     return @interfaces;
@@ -814,6 +883,8 @@ my @win32_ole_calls : shared;
 sub start_Win32_OLE_Worker {
 
     unless (defined($worker)) {
+        # Be sure to not come here from the initialized thread
+        $worker = 0;
 
         # Handle thread KILL signal
         $SIG{KILL} = sub { threads->exit(); };
@@ -834,9 +905,9 @@ sub setupWorkerLogger {
 
     # Just create a new Logger object in worker to update default module configuration
     return defined(GLPI::Agent::Logger->new(%params))
-        unless (defined($worker));
+        unless $worker;
 
-    return _call_win32_ole_dependent_api({
+    return call_not_thread_safe_api_on_win32({
         funct => 'setupWorkerLogger',
         args  => [ %params ]
     });
@@ -847,7 +918,7 @@ sub getLastError {
     return @{$worker_lasterror}
         unless (defined($worker));
 
-    return _call_win32_ole_dependent_api({
+    return call_not_thread_safe_api_on_win32({
         funct => 'getLastError',
         array => 1,
         args  => []
@@ -868,10 +939,10 @@ sub _keepOleLastError {
     if ($lasterror) {
         my $error = 0x80000000 | ($lasterror & 0x7fffffff);
         # Don't report not accurate and not failure error
-        if ($error != 0x80004005) {
+        if ($error != 0x80004005 && $error != 0x80020003) {
             $worker_lasterror = [ $error, $known_ole_errors{$error} ];
             my $logger = GLPI::Agent::Logger->new();
-            $logger->debug("Win32::OLE ERROR: ".($known_ole_errors{$error}||$lasterror));
+            $logger->debug2("Win32::OLE ERROR: ".($known_ole_errors{$error}||$lasterror));
         }
     } else {
         $worker_lasterror = [];
@@ -905,16 +976,21 @@ sub _win32_ole_worker {
             setExpirationTime(%$call);
 
             # Found requested private function and call it as expected
-            my $funct;
+            my $funct = $call->{funct};
+            if (defined($call->{module})) {
+                my $module = $call->{module};
+                $module->require() or die "Can't load required $module library\n";
+                $funct = $module."::".$funct;
+            }
             eval {
                 no strict 'refs'; ## no critic (ProhibitNoStrict)
-                $funct = \&{$call->{'funct'}};
+                $funct = \&{$funct};
             };
-            if (exists($call->{'array'}) && $call->{'array'}) {
-                my @results = &{$funct}(@{$call->{'args'}});
+            if (exists($call->{array}) && $call->{array}) {
+                my @results = &{$funct}(@{$call->{args}});
                 $result = \@results;
             } else {
-                $result = &{$funct}(@{$call->{'args'}});
+                $result = &{$funct}(@{$call->{args}});
             }
 
             # Keep Win32::OLE error for later reporting
@@ -932,7 +1008,7 @@ sub _win32_ole_worker {
     }
 }
 
-sub _call_win32_ole_dependent_api {
+sub call_not_thread_safe_api_on_win32 {
     my ($call) = @_
         or return;
 
@@ -981,7 +1057,7 @@ sub _call_win32_ole_dependent_api {
                 # Worker is failing: get back to mono-thread and pray
                 $worker->detach() if (defined($worker) && !$worker->is_detached());
                 $worker = undef;
-                return _call_win32_ole_dependent_api(@_);
+                return call_not_thread_safe_api_on_win32(@_);
             }
         }
 

@@ -12,12 +12,10 @@
     -e "$template_path/$request.css" ? "
   <link rel='stylesheet' href='$url_path/$request.css' type='text/css' />"
     : "" }{
-    $request eq 'results' && $edit && $need_datetime ? "
-  <link rel='stylesheet' href='$url_path/flatpickr.min.css' type='text/css' />"
-    : "" }{
     -e "$template_path/custom.css" ? "
   <link rel='stylesheet' href='$url_path/custom.css' type='text/css' />"
     : "" }
+  <link rel="stylesheet" href="{$url_path}/tabler-icons.min.css" type="text/css" />
   <link rel="shortcut icon" type="images/x-icon" href="{$url_path}/favicon.ico" >
 </head>
 <body>
@@ -46,7 +44,9 @@
         agent   => _($GLPI::Agent::Version::PROVIDER." Agent").
             " v".$GLPI::Agent::Version::VERSION,
         url     => "https://github.com/glpi-project/glpi-agent",
-        plugin  => _("ToolBox Plugin").
+        plugin  => _("ToolBox GLPI Agent plugin").
             " v".$GLPI::Agent::HTTP::Server::ToolBox::VERSION,
+        deviceid => $hash->{deviceid} || "",
+        agentid => $hash->{agentid} || "",
     })
 }

@@ -67,7 +67,7 @@ our $runMeIfTheseChecksFailed =
     ["GLPI::Agent::Task::Inventory::Linux::Distro::OSRelease"];
 
 sub isEnabled {
-    return !(has_file('/etc/os-release'));
+    return canRead('/etc/os-release') ? 0 : 1;
 }
 
 sub doInventory {
@@ -115,10 +115,19 @@ sub _getDistroData {
     };
 
     if ($name eq 'SuSE') {
-        $data->{SERVICE_PACK} = getFirstMatch(
-            file    => '/etc/SuSE-release',
-            pattern => qr/^PATCHLEVEL = ([0-9]+)/
-        );
+        # SLES15 doesn't have /etc/SuSE-release
+        if (-e '/etc/SuSE-release') {
+            $data->{SERVICE_PACK} = getFirstMatch(
+                file    => '/etc/SuSE-release',
+                pattern => qr/^PATCHLEVEL = ([0-9]+)/
+            );
+        } else {
+            # fall back by checking if there's a -SP in the current version
+            # if so, split by -SP
+            if ($version =~ m/\-SP.+/) {
+              ($data->{VERSION}, $data->{SERVICE_PACK}) = $version =~ m/(.*)-SP(.*)/;
+            }
+        }
     }
 
     return $data;

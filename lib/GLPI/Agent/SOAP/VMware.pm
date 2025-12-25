@@ -4,19 +4,22 @@ use strict;
 use warnings;
 
 use English qw(-no_match_vars);
-use XML::TreePP;
 use LWP::UserAgent;
 use HTTP::Cookies;
 
 use GLPI::Agent;
+use GLPI::Agent::XML;
 use GLPI::Agent::SOAP::VMware::Host;
 
 sub new {
     my ($class, %params) = @_;
 
     my $self = {
-        url => $params{url},
-        tpp => XML::TreePP->new(force_array => [qw(returnval propSet)]),
+        url  => $params{url},
+        _xml => GLPI::Agent::XML->new(
+            force_array => [ qw(returnval propSet) ],
+            skip_attr   => 1, # Skip attributes while dumping as hash
+        ),
     };
     bless $self, $class;
 
@@ -30,6 +33,19 @@ sub new {
     );
 
     return $self;
+}
+
+sub timeout {
+    my ($self, $timeout) = @_;
+
+    # Get/set LWP::UserAgent timeout as required
+    return $self->{ua}->timeout($timeout);
+}
+
+sub lastError {
+    my ($self) = @_;
+
+    return $self->{_lastError} // '';
 }
 
 sub _send {
@@ -48,19 +64,18 @@ sub _send {
     if ( $res->is_success ) {
         return $res->content;
     } else {
-        my $err    = $res->content;
-        my $tmpRef = {};
+        my $err = $res->content;
+        my $tmpRef;
 
-        eval {
-            $err =~ s/.*(<faultstring>.*<\/faultstring>).*/$1/sg;
-            $tmpRef = $self->{tpp}->parse($err);
-        };
+        if ($err =~ m{(<faultstring>.*</faultstring>)}sg) {
+            $tmpRef = $self->{_xml}->string($1)->dump_as_hash();
+        }
 
         my $errorString = $res->status_line;
         if ( $tmpRef && $tmpRef->{faultstring} ) {
             $errorString .= ": " . $tmpRef->{faultstring};
         }
-        $self->{lastError} = $errorString;
+        $self->{_lastError} = $errorString;
         return;
     }
 
@@ -68,30 +83,34 @@ sub _send {
 }
 
 sub _parseAnswer {
-    my ( $self, $answer ) = @_;
+    my ($self, $answer) = @_;
 
     return unless $answer;
 
-    local $INPUT_RECORD_SEPARATOR; # Set input to "slurp" mode.
+    my $dump = $self->{_xml}->string($answer)->dump_as_hash()
+        or return;
 
-    # We simplify the XML structure
-    my $pattern = '.*<\w+Response xmlns="urn:vim25">(.+)</\w+Response>.*$';
-    $answer =~ s/$pattern/$1/sg;
-    $answer =~ s/ (xsi:|)type="[:\w]+"//sg;
-    $answer =~ s/[[:cntrl:]]//g;
-    my $tmpRef = $self->{tpp}->parse($answer);
+    return unless exists($dump->{'soapenv:Envelope'}->{'soapenv:Body'});
+
+    my $body = $dump->{'soapenv:Envelope'}->{'soapenv:Body'};
+
+    my ($bodyKey) = keys(%{$body});
+    return unless ref($body->{$bodyKey}) eq 'HASH' && exists($body->{$bodyKey}->{'returnval'});
+
+    my $returnval = $body->{$bodyKey}->{'returnval'};
+    return unless ref($returnval) eq 'ARRAY';
 
     my $ref = [];
-    foreach ( @{ $tmpRef->{returnval} } ) {
-        if ( $_->{propSet} ) {
+    foreach my $val (@{$returnval}) {
+        if (ref($val->{propSet}) eq 'ARRAY') {
             my %tmp;
-            foreach my $p ( @{ $_->{propSet} } ) {
-                next unless $p->{val};
-                $tmp{ $p->{name} } = $p->{val};
+            foreach my $p (@{$val->{propSet}}) {
+                next unless $p->{name} && defined $p->{val};
+                $tmp{$p->{name}} = $p->{val};
             }
-            push @$ref, \%tmp;
+            push @{$ref}, \%tmp;
         } else {
-            push @$ref, $_;
+            push @{$ref}, $val;
         }
     }
 
@@ -103,13 +122,13 @@ sub connect {
     my ( $self, $user, $password ) = @_;
 
     unless ($user) {
-        $self->{lastError} = "No user".($self->{lastError} ? "" : " and password").
+        $self->{_lastError} = "No user".($self->{lastError} ? "" : " and password").
             " provided for ESX connection";
         return;
     }
 
     unless ($password) {
-        $self->{lastError} = "No password provided for ESX connection";
+        $self->{_lastError} = "No password provided for ESX connection";
         return;
     }
 
@@ -153,7 +172,6 @@ sub connect {
     return if $answer =~ /ServerFaultCode/m;
 
     return $self->_parseAnswer($answer);
-
 }
 
 #sub getHostInfo {
@@ -191,10 +209,10 @@ sub _getVirtualMachineList {
     );
     my $ref = $self->_parseAnswer($answer);
     my @list;
-    if ( ref($ref) eq 'HASH' ) {
+    if (ref($ref) eq 'HASH') {
         push @list, $ref;
     }
-    elsif ($ref) {
+    elsif (ref($ref) eq 'ARRAY') {
         @list = @{$ref};
     }
 
@@ -226,11 +244,7 @@ sub _getVirtualMachineById {
     );
     return [] unless $answer;
 
-    # hack to preserve  annotation / comment formating
-    $answer =~ s/\n/&#10;/gm;
-
-    my $ref = $self->_parseAnswer($answer);
-    return $ref;
+    return $self->_parseAnswer($answer) // [];
 }
 
 sub getHostFullInfo {
@@ -252,20 +266,21 @@ sub getHostFullInfo {
         'RetrieveProperties',
         sprintf( $req, $self->{propertyCollector}, $id )
     );
-    my $ref = $self->_parseAnswer($answer);
+    my $ref = $self->_parseAnswer($answer) // [];
     my $vms = [];
     my $machineIdList;
-    if ( exists( $ref->[0]{vm}{ManagedObjectReference} ) ) {    # ESX 3.5
-        if ( ref( $ref->[0]{vm}{ManagedObjectReference} ) eq 'ARRAY' ) {
-            $machineIdList = $ref->[0]{vm}{ManagedObjectReference};
+    my $vm = ref($ref) eq 'ARRAY' && @{$ref} && ref($ref->[0]) eq 'HASH' && exists($ref->[0]{vm}) ? $ref->[0]{vm} : "";
+    # $vm can be an empty string for vCenter 7
+    if (ref($vm) eq 'HASH' && exists($vm->{ManagedObjectReference})) {    # ESX 3.5
+        if (ref($vm->{ManagedObjectReference}) eq 'ARRAY') {
+            $machineIdList = $vm->{ManagedObjectReference};
         } else {
-            push @$machineIdList, $ref->[0]{vm}{ManagedObjectReference};
+            push @$machineIdList, $vm->{ManagedObjectReference};
         }
     } else {
         $machineIdList = $self->_getVirtualMachineList();
     }
 
-    #$vm = $ref->[0]{vm};
     foreach my $id (@$machineIdList) {
         push @$vms, $self->_getVirtualMachineById($id);
     }
@@ -293,7 +308,7 @@ sub getHostIds {
 <skip>0</skip><selectSet xsi:type="TraversalSpec"><name>folderTraversalSpec</name><type>Folder</type><path>childEntity</path><skip>0</skip><selectSet><name>folderTraversalSpec</name></selectSet><selectSet><name>datacenterHostTraversalSpec</name></selectSet><selectSet><name>datacenterVmTraversalSpec</name></selectSet><selectSet><name>datacenterDatastoreTraversalSpec</name></selectSet><selectSet><name>datacenterNetworkTraversalSpec</name></selectSet><selectSet><name>computeResourceRpTraversalSpec</name></selectSet><selectSet><name>computeResourceHostTraversalSpec</name></selectSet><selectSet><name>hostVmTraversalSpec</name></selectSet><selectSet><name>resourcePoolVmTraversalSpec</name></selectSet></selectSet><selectSet xsi:type="TraversalSpec"><name>datacenterDatastoreTraversalSpec</name><type>Datacenter</type><path>datastoreFolder</path><skip>0</skip><selectSet><name>folderTraversalSpec</name></selectSet></selectSet><selectSet xsi:type="TraversalSpec"><name>datacenterNetworkTraversalSpec</name><type>Datacenter</type><path>networkFolder</path><skip>0</skip><selectSet><name>folderTraversalSpec</name></selectSet></selectSet><selectSet xsi:type="TraversalSpec"><name>datacenterVmTraversalSpec</name><type>Datacenter</type><path>vmFolder</path><skip>0</skip><selectSet><name>folderTraversalSpec</name></selectSet></selectSet><selectSet xsi:type="TraversalSpec"><name>datacenterHostTraversalSpec</name><type>Datacenter</type><path>hostFolder</path><skip>0</skip><selectSet><name>folderTraversalSpec</name></selectSet></selectSet><selectSet xsi:type="TraversalSpec"><name>computeResourceHostTraversalSpec</name><type>ComputeResource</type><path>host</path><skip>0</skip></selectSet><selectSet xsi:type="TraversalSpec"><name>computeResourceRpTraversalSpec</name><type>ComputeResource</type><path>resourcePool</path><skip>0</skip><selectSet><name>resourcePoolTraversalSpec</name></selectSet><selectSet><name>resourcePoolVmTraversalSpec</name></selectSet></selectSet><selectSet xsi:type="TraversalSpec"><name>resourcePoolTraversalSpec</name><type>ResourcePool</type><path>resourcePool</path><skip>0</skip><selectSet><name>resourcePoolTraversalSpec</name></selectSet><selectSet><name>resourcePoolVmTraversalSpec</name></selectSet></selectSet><selectSet xsi:type="TraversalSpec"><name>hostVmTraversalSpec</name><type>HostSystem</type><path>vm</path><skip>0</skip><selectSet><name>folderTraversalSpec</name></selectSet></selectSet><selectSet xsi:type="TraversalSpec"><name>resourcePoolVmTraversalSpec</name><type>ResourcePool</type><path>vm</path><skip>0</skip></selectSet></objectSet></specSet></RetrieveProperties></soapenv:Body></soapenv:Envelope>';
 
     my $answer = $self->_send('RetrieveProperties', sprintf($req) );
-    my $ref = $self->_parseAnswer($answer);
+    my $ref = $self->_parseAnswer($answer) // [];
 
     my @ids;
     foreach (@$ref) {

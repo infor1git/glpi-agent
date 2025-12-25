@@ -6,6 +6,7 @@ use lib 't/lib';
 use File::Temp qw(tempdir);
 use UNIVERSAL::require;
 use Config;
+use Storable;
 
 use Test::Exception;
 use Test::More;
@@ -13,8 +14,10 @@ use Test::MockModule;
 use Test::Deep qw(cmp_deeply);
 
 use GLPI::Agent::Logger;
+use GLPI::Agent::Config;
 use GLPI::Agent::Target::Server;
 use GLPI::Agent::HTTP::Client::OCS;
+use GLPI::Agent::XML::Response;
 use GLPI::Agent::XML::Query::Prolog;
 
 use GLPI::Agent::Version;
@@ -23,12 +26,8 @@ use GLPI::Agent::Task::NetInventory::Version;
 our $VERSION = $GLPI::Agent::Version::VERSION;
 our $TASKVERSION = GLPI::Agent::Task::NetInventory::Version::VERSION;
 
-# check thread support availability
-if (!$Config{usethreads} || $Config{usethreads} ne 'define') {
-    plan skip_all => 'thread support required';
-}
-
 GLPI::Agent::Task::NetInventory->use();
+GLPI::Agent::Task::NetInventory::Job->use();
 
 # Setup a target with a Test logger and debug
 my $logger = GLPI::Agent::Logger->new(
@@ -110,7 +109,7 @@ my %responses = (
         cmp     => {
             jobs    => 2,
             devices => [ 1, 1 ],
-            lastlog => qr/All netinventory threads terminated/
+            lastlog => qr/All netinventory workers terminated/
         },
         PROLOG  =>
 '<?xml version="1.0" encoding="UTF-8"?>
@@ -136,7 +135,7 @@ my %responses = (
 </REPLY>
 ',
         SNMPQUERY   => [
-'<?xml version="1.0" encoding="UTF-8" ?>
+'<?xml version="1.0" encoding="UTF-8"?>
 <REQUEST>
   <CONTENT>
     <AGENT>
@@ -150,7 +149,7 @@ my %responses = (
   <QUERY>SNMPQUERY</QUERY>
 </REQUEST>
 ',
-'<?xml version="1.0" encoding="UTF-8" ?>
+'<?xml version="1.0" encoding="UTF-8"?>
 <REQUEST>
   <CONTENT>
     <DEVICE>
@@ -168,7 +167,7 @@ my %responses = (
   <QUERY>SNMPQUERY</QUERY>
 </REQUEST>
 ',
-'<?xml version="1.0" encoding="UTF-8" ?>
+'<?xml version="1.0" encoding="UTF-8"?>
 <REQUEST>
   <CONTENT>
     <AGENT>
@@ -181,7 +180,7 @@ my %responses = (
   <QUERY>SNMPQUERY</QUERY>
 </REQUEST>
 ',
-'<?xml version="1.0" encoding="UTF-8" ?>
+'<?xml version="1.0" encoding="UTF-8"?>
 <REQUEST>
   <CONTENT>
     <AGENT>
@@ -194,7 +193,7 @@ my %responses = (
   <QUERY>SNMPQUERY</QUERY>
 </REQUEST>
 ',
-'<?xml version="1.0" encoding="UTF-8" ?>
+'<?xml version="1.0" encoding="UTF-8"?>
 <REQUEST>
   <CONTENT>
     <AGENT>
@@ -208,7 +207,7 @@ my %responses = (
   <QUERY>SNMPQUERY</QUERY>
 </REQUEST>
 ',
-'<?xml version="1.0" encoding="UTF-8" ?>
+'<?xml version="1.0" encoding="UTF-8"?>
 <REQUEST>
   <CONTENT>
     <DEVICE>
@@ -228,7 +227,7 @@ my %responses = (
   <QUERY>SNMPQUERY</QUERY>
 </REQUEST>
 ',
-'<?xml version="1.0" encoding="UTF-8" ?>
+'<?xml version="1.0" encoding="UTF-8"?>
 <REQUEST>
   <CONTENT>
     <AGENT>
@@ -241,7 +240,7 @@ my %responses = (
   <QUERY>SNMPQUERY</QUERY>
 </REQUEST>
 ',
-'<?xml version="1.0" encoding="UTF-8" ?>
+'<?xml version="1.0" encoding="UTF-8"?>
 <REQUEST>
   <CONTENT>
     <AGENT>
@@ -260,7 +259,7 @@ my %responses = (
         cmp     => {
             jobs    => 1,
             devices => [ 1 ],
-            lastlog => qr/All netinventory threads terminated/
+            lastlog => qr/Netinventory worker terminated/
         },
         PROLOG  =>
 '<?xml version="1.0" encoding="UTF-8"?>
@@ -276,7 +275,7 @@ my %responses = (
 </REPLY>
 ',
         SNMPQUERY   => [
-'<?xml version="1.0" encoding="UTF-8" ?>
+'<?xml version="1.0" encoding="UTF-8"?>
 <REQUEST>
   <CONTENT>
     <AGENT>
@@ -290,13 +289,13 @@ my %responses = (
   <QUERY>SNMPQUERY</QUERY>
 </REQUEST>
 ',
-'<?xml version="1.0" encoding="UTF-8" ?>
+'<?xml version="1.0" encoding="UTF-8"?>
 <REQUEST>
   <CONTENT>
     <DEVICE>
       <ERROR>
         <ID>86</ID>
-        <MESSAGE>SNMP emulation error: non-existing file &apos;xxx&apos;</MESSAGE>
+        <MESSAGE>SNMP emulation error: non-existing file \'xxx\'</MESSAGE>
         <TYPE>NETWORKING</TYPE>
       </ERROR>
     </DEVICE>
@@ -307,7 +306,7 @@ my %responses = (
   <QUERY>SNMPQUERY</QUERY>
 </REQUEST>
 ',
-'<?xml version="1.0" encoding="UTF-8" ?>
+'<?xml version="1.0" encoding="UTF-8"?>
 <REQUEST>
   <CONTENT>
     <AGENT>
@@ -320,7 +319,7 @@ my %responses = (
   <QUERY>SNMPQUERY</QUERY>
 </REQUEST>
 ',
-'<?xml version="1.0" encoding="UTF-8" ?>
+'<?xml version="1.0" encoding="UTF-8"?>
 <REQUEST>
   <CONTENT>
     <AGENT>
@@ -340,7 +339,7 @@ my %responses = (
         cmp     => {
             jobs    => 2,
             devices => [ 2, 1 ],
-            lastlog => qr/All netinventory threads terminated/
+            lastlog => qr/All netinventory workers terminated/
         },
         PROLOG  =>
 '<?xml version="1.0" encoding="UTF-8"?>
@@ -367,7 +366,7 @@ my %responses = (
 </REPLY>
 ',
         SNMPQUERY   => [
-'<?xml version="1.0" encoding="UTF-8" ?>
+'<?xml version="1.0" encoding="UTF-8"?>
 <REQUEST>
   <CONTENT>
     <DEVICE>
@@ -385,7 +384,7 @@ my %responses = (
   <QUERY>SNMPQUERY</QUERY>
 </REQUEST>
 ',
-'<?xml version="1.0" encoding="UTF-8" ?>
+'<?xml version="1.0" encoding="UTF-8"?>
 <REQUEST>
   <CONTENT>
     <DEVICE>
@@ -405,7 +404,7 @@ my %responses = (
   <QUERY>SNMPQUERY</QUERY>
 </REQUEST>
 ',
-'<?xml version="1.0" encoding="UTF-8" ?>
+'<?xml version="1.0" encoding="UTF-8"?>
 <REQUEST>
   <CONTENT>
     <DEVICE>
@@ -438,7 +437,7 @@ my %responses = (
         cmp     => {
             jobs    => 1,
             devices => [ 1 ],
-            lastlog => qr/All netinventory threads terminated/
+            lastlog => qr/Netinventory worker terminated/
         },
         PROLOG  =>
 '<?xml version="1.0" encoding="UTF-8"?>
@@ -456,13 +455,13 @@ my %responses = (
 </REPLY>
 ',
         SNMPQUERY   => [
-'<?xml version="1.0" encoding="UTF-8" ?>
+'<?xml version="1.0" encoding="UTF-8"?>
 <REQUEST>
   <CONTENT>
     <DEVICE>
       <ERROR>
         <ID>84</ID>
-        <MESSAGE>SNMP emulation error: non-existing file &apos;xxx&apos;</MESSAGE>
+        <MESSAGE>SNMP emulation error: non-existing file \'xxx\'</MESSAGE>
         <TYPE>NETWORKING</TYPE>
       </ERROR>
     </DEVICE>
@@ -477,16 +476,24 @@ my %responses = (
     },
 );
 
+# Index expected SNMPQUERY in a hash so we don't need to have them ordered
+foreach my $test (keys(%responses)) {
+    next unless ref($responses{$test}->{SNMPQUERY});
+    map {
+        $responses{$test}->{index}->{$_} ++;
+    } @{$responses{$test}->{SNMPQUERY}};
+}
+
 my $plan_tests_count = 6 * keys(%responses);
-foreach my $case (keys(%responses)) {
-    $plan_tests_count += scalar(@{$responses{$case}->{SNMPQUERY}})
-        if $responses{$case}->{SNMPQUERY};
+foreach my $case (values(%responses)) {
+    next unless $case->{SNMPQUERY};
+    $plan_tests_count += scalar(@{$case->{SNMPQUERY}});
 }
 
 plan tests => $plan_tests_count ;
 
-my $queue = Thread::Queue->new();
-my $tid = threads->tid();
+my $test_pid = $$;
+my $storable_tempdir = tempdir(CLEANUP => 1);
 
 my $client_module = Test::MockModule->new('GLPI::Agent::HTTP::Client::OCS');
 $client_module->mock('send', sub {
@@ -504,30 +511,12 @@ $client_module->mock('send', sub {
 
     if (ref($response) eq 'ARRAY') {
         my $sent = $params{message}->getContent();
-        my $message = shift @{$response}
-            or die "\nUnexpected $query sent message:\n$sent\n";
 
-        # Dirty hack: the test was working as messages was ordered thanks to not
-        # working multi-threading algorithm. So try to compare messages while they
-        # have the same length but we need to handle the case where many responses has
-        # the same length and in that case, we better try to find it in the list
-        my @matchs = grep { length($sent) == length($_) } @{$response};
-        if (@matchs) {
-            my $max = @{$response};
-            my @others = ();
-            while ($max-- && @matchs>1 ? $sent ne $message : length($sent) != length($message)) {
-                push @others, $message;
-                $message = shift @{$response};
-            }
-            unshift @{$response}, @others if @others;
-        }
-
-        # When received in another thread than test thread, keep %params to be
-        # re-used for the same call later from the test thread
-        if (threads->tid() != $tid) {
-            $queue->enqueue(\%params);
+        # In workers, store %params to be sent later in testing process
+        if ($test_pid != $$) {
+            store \%params, "$storable_tempdir/sent-$$";
         } else {
-            cmp_deeply($sent, $message, "Sent $query message");
+            ok ($responses{$case}->{index}->{$sent}--, "Sent $query message");
         }
     }
 
@@ -558,7 +547,7 @@ foreach my $case (keys(%responses)) {
         $task = GLPI::Agent::Task::NetInventory->new(
             target      => $target,
             logger      => $logger,
-            config      => {},
+            config      => GLPI::Agent::Config->new(),
             datadir     => tempdir(CLEANUP => 1),
             deviceid    => $case
         );
@@ -566,9 +555,11 @@ foreach my $case (keys(%responses)) {
 
     $task->run() if $task->isEnabled($response);
 
-    # "Re-send" in test thread calls from other threads, see client send() mock up
-    while (my $sent = $queue->dequeue_nb()) {
+    # Send back in current test process what workers wanted to send
+    foreach my $file (glob("$storable_tempdir/sent-*")) {
+        my $sent = retrieve($file);
         $client->send(%{$sent});
+        unlink $file;
     }
 
     ok(

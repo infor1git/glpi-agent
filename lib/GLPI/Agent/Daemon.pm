@@ -24,8 +24,14 @@ use GLPI::Agent::Version;
 use GLPI::Agent::Tools;
 use GLPI::Agent::Tools::Generic;
 use GLPI::Agent::Protocol::Contact;
+use GLPI::Agent::Event;
 
 my $PROVIDER = $GLPI::Agent::Version::PROVIDER;
+
+# Avoid being killed on early SIGUSR1 signal
+my $runnow = 0;
+$SIG{USR1} = sub { $runnow = 1; }
+    unless $OSNAME eq 'MSWin32';
 
 sub init {
     my ($self, %params) = @_;
@@ -51,6 +57,12 @@ sub init {
     $SIG{HUP} = sub { $self->reinit(); };
     $SIG{USR1} = sub { $self->runNow(); }
         unless ($OSNAME eq 'MSWin32');
+
+    # Handle USR1 signal received during start
+    if ($runnow) {
+        $runnow = 0;
+        $self->runNow();
+    }
 }
 
 sub reinit {
@@ -89,14 +101,14 @@ sub run {
     if ($logger) {
         if ($config->{'no-fork'}) {
             $logger->debug2("Waiting in mainloop");
-            foreach my $target (@targets) {
-                my $date = $target->getFormatedNextRunDate();
-                my $type = $target->getType();
-                my $name = $target->getName();
-                $logger->debug2("$type target next run: $date - $name");
-            }
         } else {
             $logger->debug("Running in background mode");
+        }
+        foreach my $target (@targets) {
+            my $date = $target->getFormatedNextRunDate();
+            my $id   = $target->id();
+            my $info = $target->isType('local') ? $target->getFullPath() : $target->getName();
+            $logger->info("target $id: next run: $date - $info");
         }
     }
 
@@ -123,15 +135,15 @@ sub run {
             $logger->error($EVAL_ERROR) if ($EVAL_ERROR && $logger);
             if ($net_error) {
                 # Prefer to retry event later on net error
-                $event->{delay} = 60;
+                $event->rundate(time + 60);
                 $target->addEvent($event);
             }
 
             # Leave immediately if we passed in terminate method
             last if $self->{_terminate};
 
-            # Call service optimization after each target run
-            $self->RunningServiceOptimization();
+            # We should run service optimization after all targets can be run
+            $self->{_run_optimization} = scalar($self->getTargets());
 
         } elsif ($time >= $target->getNextRunDate()) {
 
@@ -147,17 +159,24 @@ sub run {
                 $target->resetNextRunDate();
             }
 
-            if ($logger && $config->{'no-fork'}) {
+            if ($logger) {
                 my $date = $target->getFormatedNextRunDate();
-                my $type = $target->getType();
-                $logger->debug2("$type target scheduled: $date");
+                my $id   = $target->id();
+                my $name = $target->getName();
+                $logger->info("target $id: next run: $date - $name");
             }
 
             # Leave immediately if we passed in terminate method
             last if $self->{_terminate};
 
-            # Call service optimization after each target run
+            # We should run service optimization after all targets can be run
+            $self->{_run_optimization} = scalar($self->getTargets());
+        }
+
+        # Call service optimization after all target has been run
+        if (defined($self->{_run_optimization}) && $self->{_run_optimization}-- <= 1) {
             $self->RunningServiceOptimization();
+            delete $self->{_run_optimization};
         }
 
         # This eventually check for http messages, default timeout is 1 second
@@ -190,22 +209,24 @@ sub _reloadConfIfNeeded {
 sub runTargetEvent {
     my ($self, $target, $event) = @_;
 
-    $self->{logger}->debug("target $target->{id}: ".($event->{name}//"unknown")." event for $event->{task} task");
+    return unless $event->name && $event->task;
+
+    $self->{logger}->debug("target ".$target->id().": ".$event->name()." event for ".$event->task()." task");
 
     $self->{event} = $event;
 
-    if ($event && $event->{init}) {
+    if ($event && $event->init) {
         eval {
             # We don't need to fork for init event
-            $self->runTaskReal($target, ucfirst($event->{task}));
+            $self->runTaskReal($target, ucfirst($event->task));
         };
     } else {
         # Simulate CONTACT server response
         my $contact = GLPI::Agent::Protocol::Contact->new(
-            tasks => { $event->{task} => { params => [$event] }}
+            tasks => { $event->task => { params => [ $event->params ] }}
         );
         eval {
-            $self->runTask($target, ucfirst($event->{task}), $contact);
+            $self->runTask($target, ucfirst($event->task), $contact);
         };
         $self->{logger}->error($EVAL_ERROR) if $EVAL_ERROR;
         $self->setStatus($target->paused() ? 'paused' : 'waiting');
@@ -256,6 +277,32 @@ sub runTask {
     }
 }
 
+sub handleTaskCache {
+    my ($self, $name, $task) = @_;
+
+    return unless $task && $task->keepcache();
+
+    # Try to cache data provided by the task if the next run can require it
+    my $cachedata = $task->cachedata();
+    if (defined($cachedata) && GLPI::Agent::Protocol::Message->require()) {
+        my $data = GLPI::Agent::Protocol::Message->new(message => $cachedata);
+        $self->forked_process_event("AGENTCACHE,$name,".$data->getRawContent());
+    }
+}
+
+sub handleTaskEvent {
+    my ($self, $name, $task) = @_;
+
+    return unless $task;
+    my $event = $task->event()
+        or return;
+
+    if (GLPI::Agent::Protocol::Message->require()) {
+        my $message = GLPI::Agent::Protocol::Message->new(message => $event->dump_for_message());
+        $self->forked_process_event("TASKEVENT,$name,".$message->getRawContent());
+    }
+}
+
 sub createDaemon {
     my ($self) = @_;
 
@@ -263,8 +310,11 @@ sub createDaemon {
     my $logger = $self->{logger};
 
     # Don't try to create a daemon if configured as a service
-    return $logger->info("$PROVIDER Agent service starting")
-        if $config->{service};
+    if ($config->{service}) {
+        # From here we can also support process forking
+        $self->{_fork} = {} unless $self->{_fork};
+        return $logger->info("$PROVIDER Agent service starting");
+    }
 
     $logger->info("$PROVIDER Agent starting");
 
@@ -385,8 +435,8 @@ sub events_cb {
         $self->{_cache}->{$task} = $data->get;
     } elsif ($type eq 'TASKEVENT' && $dump =~ /^\{/ && GLPI::Agent::Protocol::Message->require()) {
         my $message = GLPI::Agent::Protocol::Message->new(message => $dump);
-        my $event = $message->get;
-        my $targetid = $event->{target};
+        my $event = GLPI::Agent::Event->new(from_message => $message->get);
+        my $targetid = $event->target;
         my @targets = grep { !$targetid || $_->id() eq $targetid } $self->getTargets();
         map { $_->addEvent($event) } @targets;
     }
@@ -403,6 +453,7 @@ sub handleChildren {
         my $child = $self->{_fork}->{$pid};
 
         # Check if any forked process is communicating
+        my @messages;
         delete $child->{in} unless $child->{in} && $child->{in}->opened;
         while ($child->{in} && $child->{pollin} && $child->{poll} && &{$child->{poll}}($child->{pollin})) {
             my $msg = " " x 5;
@@ -415,13 +466,16 @@ sub handleChildren {
                         if $child->{in}->sysread($len, 2);
                     if ($len) {
                         my $event;
-                        $self->_trigger_event($event)
+                        push @messages, $event
                             if $child->{in}->sysread($event, $len);
                     }
                 }
             }
             $count++;
         }
+
+        # Trigger events after they have been read
+        map { $self->_trigger_event($_) } @messages;
 
         # Check if any forked process has been finished
         waitpid($pid, WNOHANG)
@@ -588,14 +642,20 @@ sub forked_process_event {
     return unless $self->forked() && defined($event);
 
     return unless length($event);
-    if (length($event) > 65535) {
-        $self->{logger}->error("Skipping too long forked process event");
+    # On MSWin32, syswrite can block if header+size+event is greater than 512 bytes
+    if (length($event) > 505) {
+        my ($type) = split(",", $event)
+            or return;
+        $type = substr($event, 0, 64) if length($type) > 64;
+        # Just ignore too big logger event like full inventory content logged at debug2 level
+        return if $type eq 'LOGGER';
+        $self->{logger}->error("Skipping $type too long forked process event");
         return;
     }
 
-    $self->{_ipc_out}->syswrite(IPC_EVENT);
-    $self->{_ipc_out}->syswrite(pack("S", length($event)));
-    $self->{_ipc_out}->syswrite($event);
+    # Send IPC_EVENT in one message to prevent concurrent syswrite() calls from
+    # Parallel::ForkManager children to mix up messages
+    $self->{_ipc_out}->syswrite(IPC_EVENT.pack("S", length($event)).$event);
     GLPI::Agent::Tools::Win32::setPoller($self->{_ipc_pollin})
         if $OSNAME eq 'MSWin32';
 }
@@ -702,10 +762,13 @@ sub ApplyServiceOptimizations {
     # Preload all IDS databases to avoid reload them all the time during inventory
     my @planned = map { $_->plannedTasks() } $self->getTargets();
     if (grep { /^inventory$/i } @planned) {
-        my %datadir = ( datadir => $self->{datadir} );
-        getPCIDeviceVendor(%datadir);
-        getUSBDeviceVendor(%datadir);
-        getEDIDVendor(%datadir);
+        my %params = (
+            logger  => $self->{logger},
+            datadir => $self->{datadir}
+        );
+        getPCIDeviceVendor(%params);
+        getUSBDeviceVendor(%params);
+        getEDIDVendor(%params);
     }
 }
 

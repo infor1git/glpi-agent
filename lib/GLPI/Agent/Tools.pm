@@ -10,7 +10,6 @@ use File::Basename;
 use File::Spec;
 use File::stat;
 use File::Which;
-use Memoize;
 use UNIVERSAL::require;
 
 use GLPI::Agent::Tools::Expiration;
@@ -22,6 +21,7 @@ BEGIN {
 our $ARGV;
 
 our @EXPORT = qw(
+    empty
     first
     getDirectoryHandle
     getFileHandle
@@ -32,6 +32,7 @@ our @EXPORT = qw(
     getCanonicalSpeed
     getCanonicalInterfaceSpeed
     getCanonicalSize
+    getCanonicalPower
     getSanitizedString
     getUtf8String
     trimWhitespace
@@ -42,6 +43,7 @@ our @EXPORT = qw(
     getLinesCount
     compareVersion
     canRun
+    canRead
     hex2char
     hex2dec
     dec2hex
@@ -63,16 +65,8 @@ our @EXPORT = qw(
     ReadLink
     GetNextUser
     Uname
+    month
 );
-
-# this trigger some errors under win32:
-# Anonymous function called in forbidden scalar context
-if ($OSNAME ne 'MSWin32') {
-    memoize('canRun');
-    memoize('Uname');
-    memoize('has_file');
-    memoize('OSNAME');
-}
 
 our $remote;
 
@@ -120,6 +114,12 @@ sub has_file {
     return $remote->remoteTestFile($f);
 }
 
+sub canRead {
+    my $f = shift;
+    return -r $f unless $remote;
+    return $remote->remoteTestFile($f, 'r');
+}
+
 sub has_link {
     my $f = shift;
     return -l $f unless $remote;
@@ -148,6 +148,10 @@ sub GetNextUser {
         uid     => $entry[2],
         dir     => $entry[7]
     };
+}
+
+sub empty {
+    return defined($_[0]) && length($_[0]) ? 0 : 1;
 }
 
 # Avoid List::Util dependency re-using 'any' sub as template
@@ -211,11 +215,13 @@ sub getCanonicalManufacturer {
 
     my %regexp = (
         "Apple"           => qr/^APPLE/i,
-        "Hewlett-Packard" => qr/^(hp|HPE?|(?i)hewlett[ -]packard)/,
+        "Hewlett-Packard" => qr/^(hp|HPE?|(?i)hewlett[ -]packard|MM)/,
         "Hitachi"         => qr/^(HD|IC|HU|HGST)/,
         "Seagate"         => qr/^(ST|(?i)seagate)/,
         "Sony"            => qr/^OPTIARC/i,
-        "Western Digital" => qr/^(WDC|(?i)western)/,
+        "Western Digital" => qr/^(WDC?|(?i)western)/,
+        "Crucial"         => qr/^CT/,
+        "PNY"             => qr/^PNY/,
     );
 
     if (exists $manufacturers{$manufacturer}) {
@@ -229,6 +235,7 @@ sub getCanonicalManufacturer {
         hitachi    |
         ibm        |
         intel      |
+        kingston   |
         matshita   |
         maxtor     |
         nvidia     |
@@ -315,13 +322,40 @@ sub getCanonicalSize {
         $value =~ s/,/\./;
     }
 
+    # check unit for i char in it to reset unit & base accordingly
+    if ($unit =~ /^([eptgmk])ib$/) {
+        $unit = $1."b";
+        $base = 1024;
+    }
+
     return
+        $unit eq 'eb'    ? $value * $base * $base * $base * $base :
+        $unit eq 'pb'    ? $value * $base * $base * $base :
         $unit eq 'tb'    ? $value * $base * $base        :
         $unit eq 'gb'    ? $value * $base                :
         $unit eq 'mb'    ? $value                        :
         $unit eq 'kb'    ? int($value / ($base))         :
         $unit eq 'bytes' ? int($value / ($base * $base)) :
                            undef                         ;
+}
+
+sub getCanonicalPower {
+    my ($power) = @_;
+
+    ## no critic (ExplicitReturnUndef)
+
+    return undef unless $power;
+
+    my ($value, $unit) = $power =~ /([\d]+) \s? (\S*)\S*$/x
+        or return undef;
+
+    return $value unless $unit;
+
+    return
+        $unit eq 'kW' ? $value * 1000      :
+        $unit eq 'W'  ? $value             :
+        $unit eq 'mW' ? int($value / 1000) :
+                        undef              ;
 }
 
 sub compareVersion {
@@ -377,6 +411,9 @@ sub getSanitizedString {
 
 sub trimWhitespace {
     my ($value) = @_;
+
+    return unless defined($value);
+
     $value =~ s/^\s+//;
     $value =~ s/\s+$//;
     $value =~ s/\s+/ /g;
@@ -399,7 +436,7 @@ sub getDirectoryHandle {
     return $handle;
 }
 
-my $cmdtemplate = $OSNAME eq 'MSWin32' ? "%s 2>nul" : "exec %s 2>/dev/null";
+my $nostderr = $OSNAME eq 'MSWin32' ? "2>nul" : "2>/dev/null";
 sub getFileHandle {
     my (%params) = @_;
 
@@ -415,14 +452,14 @@ sub getFileHandle {
             if (!open $handle, $mode, $params{file}) {
                 $params{logger}->error(
                     "Can't open file $params{file}: $ERRNO"
-                ) if $params{logger};
+                ) if $params{logger} && !$params{no_error_log};
                 return;
             }
             last SWITCH;
         }
         if ($params{command}) {
             # limit log command size if too large like for powershell commands
-            my $logcommand = $params{command};
+            my $logcommand = ref($params{command}) eq "ARRAY" ? "@{$params{command}}" : $params{command};
             while (length($logcommand)>120 && $logcommand =~ /\w\s+\w/) {
                 ($logcommand) = $logcommand =~ /^(.*\w)\s+\w+/;
                 $logcommand .= " ...";
@@ -433,14 +470,22 @@ sub getFileHandle {
             # Turn off localised output for commands
             local $ENV{LC_ALL} = 'C';
             local $ENV{LANG} = 'C';
+            # Delete LD_LIBRARY_PATH && LD_PRELOAD env when run from AppImage
+            # to always run system binaries with system libraries
+            delete @ENV{qw/LD_LIBRARY_PATH LD_PRELOAD/}
+                if $ENV{LD_LIBRARY_PATH} && $ENV{APPRUN_STARTUP_APPIMAGE_UUID} && $ENV{APPDIR};
             # Ignore 'Broken Pipe' warnings on Solaris
             local $SIG{PIPE} = 'IGNORE' if $OSNAME eq 'solaris';
-            my $command = sprintf($cmdtemplate, $params{command});
-            my $cmdpid  = open($handle, '-|', $command);
+            my $cmdpid;
+            if (ref($params{command}) eq "ARRAY") {
+                $cmdpid  = open($handle, '-|', @{$params{command}}, $nostderr);
+            } else {
+                $cmdpid  = open($handle, '-|', $params{command}." ".$nostderr);
+            }
             if (!$cmdpid) {
                 $params{logger}->error(
                     "Can't run command $logcommand: $ERRNO"
-                ) if $params{logger};
+                ) if $params{logger} && !$params{no_error_log};
                 return;
             }
             # Kill command if a timeout was set
@@ -490,15 +535,15 @@ sub getFirstMatch {
     my (%params) = @_;
 
     return unless $params{pattern};
-    my $handle = getFileHandle(%params);
-    return unless $handle;
+
+    my @lines = getAllLines(%params)
+        or return;
 
     my @results;
-    while (my $line = <$handle>) {
+    foreach my $line (@lines) {
         @results = $line =~ $params{pattern};
         last if @results;
     }
-    close $handle;
 
     return wantarray ? @results : first { defined $_ } @results;
 }
@@ -524,16 +569,10 @@ sub getAllLines {
 sub getLinesCount {
     my (%params) = @_;
 
-    my $handle = getFileHandle(%params);
-    return unless $handle;
+    my @lines = getAllLines(%params)
+        or return;
 
-    my $count = 0;
-    while (my $line = <$handle>) {
-        $count++;
-    }
-    close $handle;
-
-    return $count;
+    return scalar(@lines);
 }
 
 sub canRun {
@@ -666,6 +705,27 @@ sub runFunction {
     }
 
     return $result;
+}
+
+sub month {
+    my ($month) = @_;
+
+    my %months = (
+        jan => 1,
+        feb => 2,
+        mar => 3,
+        apr => 4,
+        may => 5,
+        jun => 6,
+        jul => 7,
+        aug => 8,
+        sep => 9,
+        oct => 10,
+        nov => 11,
+        dec => 12,
+    );
+
+    return $months{lc($month)};
 }
 
 1;
@@ -840,10 +900,6 @@ Returns true if given binary can be executed.
 
 Returns true if given file can be read.
 
-=head2 canLoad($module)
-
-Returns true if given perl module can be loaded (and actually loads it).
-
 =head2 hex2char($value)
 
 Returns the value converted to a character if it starts with hexadecimal
@@ -912,3 +968,11 @@ Run a function whose name is computed at runtime and return its result.
 =head2 slurp($file)
 
 Return the content of a given file.
+
+=head2 month($month)
+
+Return the month number of the given short month name.
+
+=head2 empty($string)
+
+Return true if the given string is not defined or empty.

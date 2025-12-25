@@ -43,7 +43,6 @@ my @vmware_patterns = (
     'Vendor: VMware,\s+Model: VMware Virtual ',
     ': VMware Virtual IDE CDROM Drive'
 );
-my $vmware_pattern = _assemblePatterns(@vmware_patterns);
 
 my @qemu_patterns = (
     ' QEMUAPIC ',
@@ -54,20 +53,17 @@ my @qemu_patterns = (
     'Hypervisor detected: KVM',
     'Booting paravirtualized kernel on KVM'
 );
-my $qemu_pattern = _assemblePatterns(@qemu_patterns);
 
 my @virtual_machine_patterns = (
     ': Virtual HD,',
     ': Virtual CD,'
 );
-my $virtual_machine_pattern = _assemblePatterns(@virtual_machine_patterns);
 
 my @virtualbox_patterns = (
     ' VBOXBIOS ',
     ': VBOX HARDDISK,',
     ': VBOX CD-ROM,',
 );
-my $virtualbox_pattern = _assemblePatterns(@virtualbox_patterns);
 
 my @xen_patterns = (
     'Hypervisor signature: xen',
@@ -77,11 +73,19 @@ my @xen_patterns = (
     'xen-vbd: registered block device',
     'ACPI: [A-Z]{4} \(v\d+\s+Xen ',
 );
-my $xen_pattern = _assemblePatterns(@xen_patterns);
+
+my %match_patterns = (
+    VMware              => _assemblePatterns(@vmware_patterns),
+    QEMU                => _assemblePatterns(@qemu_patterns),
+    'Virtual Machine'   => _assemblePatterns(@virtual_machine_patterns),
+    VirtualBox          => _assemblePatterns(@virtualbox_patterns),
+    Xen                 => _assemblePatterns(@xen_patterns),
+);
+my @match_patterns_orderer = ('VMware', 'QEMU', 'Virtual Machine', 'VirtualBox', 'Xen');
 
 my %module_patterns = (
-    '^vmxnet\s' => 'VMware',
-    '^xen_\w+front\s' => 'Xen',
+    VMware  => qr/^vmxnet\s/,
+    Xen     => qr/^xen_\w+front\s/,
 );
 
 sub isEnabled {
@@ -142,6 +146,36 @@ sub doInventory {
             $inventory->setHardware({ NAME => $hostname });
         }
 
+    } elsif ($type eq "systemd-nspawn") {
+        my $uuid;
+        if (canRead("/run/host/container-uuid")) {
+            $uuid = getAllLines(
+                file    => "/run/host/container-uuid",
+                logger  => $logger
+            );
+        } elsif (canRead("/proc/1/environ")) {
+            my $init_env = getAllLines(
+                file    => '/proc/1/environ',
+                logger  => $logger
+            );
+            if ($init_env) {
+                $init_env =~ s/\0/\n/g;
+                $uuid = getFirstMatch(
+                    string  => $init_env,
+                    pattern => qr/^container_uuid=(\S+)/,
+                    logger  => $logger
+                );
+            }
+        }
+        $inventory->setHardware({ UUID => $uuid }) if $uuid;
+        if (-d "/run/host/incoming") {
+            my $name = getFirstMatch(
+                file    => "/proc/1/mountinfo",
+                pattern => qr{/systemd/nspawn/propagate/(\S+) /run/host/incoming},
+                logger  => $logger
+            );
+            $inventory->setHardware({ NAME => $name }) if $name;
+        }
     } elsif (($type eq 'lxc' || ($type ne 'Physical' && !$inventory->getHardware('UUID'))) && has_file('/etc/machine-id')) {
         # Set UUID from /etc/machine-id & /etc/hostname for container like lxc
         my $machineid = getFirstLine(
@@ -156,6 +190,11 @@ sub doInventory {
         if ($machineid && $hostname) {
             $inventory->setHardware({ UUID => getVirtualUUID($machineid, $hostname) });
         }
+    } elsif ($type eq 'VirtualBox') {
+        # On VirtualBox, set SSN from system uuid. Here we support win32 without dmidecode case.
+        my $uuid  = $inventory->getHardware('UUID');
+        $inventory->setBios({ SSN  => lc($uuid) })
+            if $uuid && !$inventory->getBios('SSN');
     }
 
     $inventory->setHardware({
@@ -165,6 +204,56 @@ sub doInventory {
 
 sub _getType {
     my ($inventory, $logger) = @_;
+
+    # First check if we are in a container before checking virtualization as we
+    # still can detect the host is virtualized
+
+    if (canRun('/sbin/sysctl')) {
+        my $line = getFirstLine(
+            command => '/sbin/sysctl -n security.jail.jailed',
+            logger => $logger
+        );
+        return 'BSDJail' if $line && $line == 1;
+    }
+
+    # systemd based container like lxc or systemd-nspawn should be tested before
+    if (canRead('/proc/1/environ')) {
+        my $init_env = getAllLines(
+            file => '/proc/1/environ',
+            no_error_log => 1,
+            logger => $logger
+        );
+        if ($init_env) {
+            $init_env =~ s/\0/\n/g;
+            my $container_type = getFirstMatch(
+                string  => $init_env,
+                pattern => qr/^container=(\S+)/,
+                logger  => $logger
+            );
+            return $container_type if $container_type;
+        }
+    }
+
+    # OpenVZ
+    if (canRead('/proc/self/status')) {
+        my @selfstatus = getAllLines(
+            file => '/proc/self/status',
+            logger => $logger
+        );
+        foreach my $line (@selfstatus) {
+            my ($key, $value) = split(/:/, $line);
+            return "Virtuozzo" if $key eq 'envID' && $value > 0;
+        }
+    }
+
+    # WSL
+    if (has_file('/proc/sys/fs/binfmt_misc/WSLInterop')) {
+        return "WSL";
+    } elsif (canRun('lscpu') && getFirstMatch(command => 'lscpu', pattern => qr/^Hypervisor vendor:\s+(Windows Subsystem for Linux|Microsoft)/)) {
+        return "WSL";
+    } elsif (has_file('/proc/mounts') && getFirstMatch(file => '/proc/mounts', pattern => qr/^rootfs\s+\/\s+(wslfs)/)) {
+        return "WSL";
+    }
 
     my $SMANUFACTURER = $inventory->getBios('SMANUFACTURER');
     my $SMODEL        = $inventory->getBios('SMODEL');
@@ -239,107 +328,49 @@ sub _getType {
 
     my $result;
 
-    if (canRun('/sbin/sysctl')) {
-        my $handle = getFileHandle(
-            command => '/sbin/sysctl -n security.jail.jailed',
-            logger => $logger
-        );
-        my $line = <$handle>;
-        close $handle;
-        return 'BSDJail' if $line && $line == 1;
-    }
-
     # loaded modules
 
-    if (has_file('/proc/modules')) {
-        my $handle = getFileHandle(
+    if (canRead('/proc/modules')) {
+        my @lines = getAllLines(
             file => '/proc/modules',
             logger => $logger
         );
-        while (my $line = <$handle>) {
-            foreach my $pattern (keys %module_patterns) {
-                next unless $line =~ /$pattern/;
-                $result = $module_patterns{$pattern};
-                last;
-            }
+        foreach my $type (keys(%module_patterns)) {
+            return $type if any { $_ =~ $module_patterns{$type} } @lines;
         }
-        close $handle;
     }
-    return $result if $result;
 
     # dmesg
     # dmesg can be empty or near empty on some systems (notably on Debian 8)
 
-    my $handle;
-    if (has_file('/var/log/dmesg') && FileStat('/var/log/dmesg')->size > 40) {
-        $handle = getFileHandle(file => '/var/log/dmesg', logger => $logger);
+    my @lines;
+    if (canRead('/var/log/dmesg') && FileStat('/var/log/dmesg')->size > 40) {
+        @lines = getAllLines(file => '/var/log/dmesg', logger => $logger);
     } elsif (canRun('/bin/dmesg')) {
-        $handle = getFileHandle(command => '/bin/dmesg', logger => $logger);
+        @lines = getAllLines(command => '/bin/dmesg', logger => $logger);
     } elsif (canRun('/sbin/dmesg')) {
         # On OpenBSD, dmesg is in sbin
         # http://forge.fusioninventory.org/issues/402
-        $handle = getFileHandle(command => '/sbin/dmesg', logger => $logger);
+        @lines = getAllLines(command => '/sbin/dmesg', logger => $logger);
     }
 
-    if ($handle) {
-        $result = _matchPatterns($handle);
-        close $handle;
+    if (@lines) {
+        $result = _matchPatterns(\@lines);
         return $result if $result;
     }
 
     # scsi
 
-    if (has_file('/proc/scsi/scsi')) {
-        my $handle = getFileHandle(
+    if (canRead('/proc/scsi/scsi')) {
+        my @lines = getAllLines(
             file => '/proc/scsi/scsi',
             logger => $logger
         );
-        if ($handle) {
-            $result = _matchPatterns($handle);
-            close $handle;
+        if (@lines) {
+            $result = _matchPatterns(\@lines);
             return $result if $result;
         }
     }
-
-    # systemd based container like lxc
-
-    if (has_file('/proc/1/environ')) {
-        my $init_env = getAllLines(
-            file => '/proc/1/environ',
-            logger => $logger
-        );
-        if ($init_env) {
-            $init_env =~ s/\0/\n/g;
-            my $container_type = getFirstMatch(
-                string  => $init_env,
-                pattern => qr/^container=(\S+)/,
-                logger  => $logger
-            );
-            return $container_type if $container_type;
-        }
-    }
-    # OpenVZ
-    if (has_file('/proc/self/status')) {
-        my @selfstatus = getAllLines(
-            file => '/proc/self/status',
-            logger => $logger
-        );
-        foreach my $line (@selfstatus) {
-            my ($key, $value) = split(/:/, $line);
-            $result = "Virtuozzo" if $key eq 'envID' && $value > 0;
-        }
-    }
-
-    # WSL
-    if (has_file('/proc/sys/fs/binfmt_misc/WSLInterop')) {
-        $result = "WSL";
-    } elsif (canRun('lscpu') && getFirstMatch(command => 'lscpu', pattern => qr/^Hypervisor vendor:\s+(Windows Subsystem for Linux|Microsoft)/)) {
-        $result = "WSL";
-    } elsif (has_file('/proc/mounts') && getFirstMatch(file => '/proc/mounts', pattern => qr/^rootfs\s+\/\s+(wslfs)/)) {
-        $result = "WSL";
-    }
-
-    return $result if $result;
 
     return 'Physical';
 }
@@ -352,14 +383,11 @@ sub _assemblePatterns {
 }
 
 sub _matchPatterns {
-    my ($handle) = @_;
+    my ($lines) = @_;
 
-    while (my $line = <$handle>) {
-        return 'VMware'          if $line =~ $vmware_pattern;
-        return 'QEMU'            if $line =~ $qemu_pattern;
-        return 'Virtual Machine' if $line =~ $virtual_machine_pattern;
-        return 'VirtualBox'      if $line =~ $virtualbox_pattern;
-        return 'Xen'             if $line =~ $xen_pattern;
+    foreach my $line (@{$lines}) {
+        my $type = first { $line =~ $match_patterns{$_} } @match_patterns_orderer;
+        return $type if $type;
     }
 }
 

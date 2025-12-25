@@ -3,6 +3,7 @@
 use strict;
 use warnings;
 
+use utf8;
 use LWP::UserAgent;
 use English qw(-no_match_vars);
 use HTTP::Response;
@@ -12,6 +13,8 @@ use Test::Exception;
 use Test::MockObject::Extends;
 use Test::MockModule;
 
+use GLPI::Agent::Inventory;
+use GLPI::Agent::XML;
 use GLPI::Agent::SOAP::VMware;
 use GLPI::Agent::Tools::Virtualization;
 
@@ -313,70 +316,48 @@ my %tests = (
             'VIRTUALDEV' => 1,
             'STATUS' => 'Up',
             'MACADDR' => '00:50:56:75:f7:2e',
-            'SPEED' => undef,
-            'PCISLOT' => undef,
-            'DRIVER' => undef,
             'MTU' => '1500',
             'DESCRIPTION' => 'vmk0',
             'IPADDRESS' => '10.0.2.189'
           },
           {
-            'IPMASK' => '',
             'VIRTUALDEV' => 0,
             'STATUS' => 'Down',
             'MACADDR' => '00:1b:24:f0:6a:45',
-            'SPEED' => '0',
             'PCISLOT' => '00:08.0',
             'DRIVER' => 'forcedeth',
-            'MTU' => undef,
             'DESCRIPTION' => 'vmnic0',
-            'IPADDRESS' => ''
           },
           {
-            'IPMASK' => '',
             'VIRTUALDEV' => 0,
             'STATUS' => 'Down',
             'MACADDR' => '00:1b:24:f0:6a:46',
-            'SPEED' => '0',
             'PCISLOT' => '00:09.0',
             'DRIVER' => 'forcedeth',
-            'MTU' => undef,
             'DESCRIPTION' => 'vmnic1',
-            'IPADDRESS' => ''
           },
           {
-            'IPMASK' => '',
             'VIRTUALDEV' => 0,
             'STATUS' => 'Down',
             'MACADDR' => '00:1b:24:f0:6a:43',
             'SPEED' => '100',
             'PCISLOT' => '06:04.0',
             'DRIVER' => 'tg3',
-            'MTU' => undef,
             'DESCRIPTION' => 'vmnic2',
-            'IPADDRESS' => ''
           },
           {
-            'IPMASK' => '',
             'VIRTUALDEV' => 0,
             'STATUS' => 'Down',
             'MACADDR' => '00:1b:24:f0:6a:44',
-            'SPEED' => '0',
             'PCISLOT' => '06:04.1',
             'DRIVER' => 'tg3',
-            'MTU' => undef,
             'DESCRIPTION' => 'vmnic3',
-            'IPADDRESS' => ''
           },
           {
             'IPMASK' => '255.255.0.0',
             'VIRTUALDEV' => 0,
             'STATUS' => 'Up',
             'MACADDR' => '00:50:56:4e:eb:6f',
-            'SPEED' => undef,
-            'PCISLOT' => undef,
-            'DRIVER' => undef,
-            'MTU' => undef,
             'DESCRIPTION' => 'vswif0',
             'IPADDRESS' => '10.0.2.190'
           }
@@ -407,7 +388,7 @@ my %tests = (
         'getDrives' => [
           {
             'VOLUMN' => undef,
-            'NAME' => 'datastore1',
+            'LABEL' => 'datastore1',
             'TOTAL' => 248571,
             'SERIAL' => '4d3ea5ac-45d89fb1-847e-001b24f06a45',
             'TYPE' => '/vmfs/volumes/4d3ea5ac-45d89fb1-847e-001b24f06a45',
@@ -415,7 +396,7 @@ my %tests = (
           },
           {
             'VOLUMN' => 'stockage1.teclib.local:/mnt/datastore/VmwareISO',
-            'NAME' => 'ISO-datastore',
+            'LABEL' => 'ISO-datastore',
             'TOTAL' => 53687,
             'SERIAL' => undef,
             'TYPE' => '/vmfs/volumes/6954b300-01710358',
@@ -431,6 +412,7 @@ my %tests = (
             'VMTYPE' => 'VMware',
             'MEMORY' => '512',
             'UUID' => '564d9904-a176-a762-1b95-f75ddd0642d8',
+            'SERIAL' => "VMware-56 4d 99 04 a1 76 a7 62-1b 95 f7 5d dd 06 42 d8",
             'VCPU' => '1'
           },
           {
@@ -441,6 +423,7 @@ my %tests = (
             'VMTYPE' => 'VMware',
             'MEMORY' => '256',
             'UUID' => '564d0750-3ae1-d18d-1613-eb489b5844c8',
+            'SERIAL' => "VMware-56 4d 07 50 3a e1 d1 8d-16 13 eb 48 9b 58 44 c8",
             'VCPU' => '1'
           },
           {
@@ -451,6 +434,7 @@ my %tests = (
             'VMTYPE' => 'VMware',
             'MEMORY' => '4096',
             'UUID' => '564df277-de0f-b401-0060-7d6a675f6460',
+            'SERIAL' => "VMware-56 4d f2 77 de 0f b4 01-00 60 7d 6a 67 5f 64 60",
             'VCPU' => '2'
           },
           {
@@ -461,6 +445,18 @@ my %tests = (
             'VMTYPE' => 'VMware',
             'MEMORY' => '512',
             'UUID' => '564d79a4-7ea6-3423-2980-0c882a78f698',
+            'SERIAL' => "VMware-56 4d 79 a4 7e a6 34 23-29 80 0c 88 2a 78 f6 98",
+            'VCPU' => '1'
+          },
+          {
+            'NAME' => '阿帕奇网络服务器',
+            'STATUS' => STATUS_RUNNING,
+            'COMMENT' => '',
+            'MAC' => '00:0c:29:06:42:ef',
+            'VMTYPE' => 'VMware',
+            'MEMORY' => '512',
+            'UUID' => 'dc3cb882-0374-4379-875c-d5f6282cc8b9',
+            'SERIAL' => "VMware-dc 3c b8 82 03 74 43 79-87 5c d5 f6 28 2c c8 b9",
             'VCPU' => '1'
           }
         ]
@@ -484,7 +480,7 @@ plan tests =>
 my $module = Test::MockModule->new('LWP::UserAgent');
 
 foreach my $test (keys %tests) {
-    my $dir = "resources/$test";
+    my $dir = "resources/esx/$test";
 
     # create mock user agent
     my $ua   = LWP::UserAgent->new();
@@ -498,13 +494,12 @@ foreach my $test (keys %tests) {
             my ($action) =
                 $request->header('soapaction') =~ /"urn:vim25#(\S+)"/;
 
-            my $tree = XML::TreePP->new()->parse($request->content());
-            my $body =
-                $tree->{'soapenv:Envelope'}->{'soapenv:Body'};
-            my $obj  =
-                $body->{RetrieveProperties}->{specSet}->{objectSet}->{obj};
-            if ($obj->{'-type'} && $obj->{'-type'} eq 'VirtualMachine') {
-                $action .= "-VM-$obj->{'#text'}";
+            my $tree = GLPI::Agent::XML->new(string => $request->content())->dump_as_hash();
+            my $body = $tree->{'soapenv:Envelope'}->{'soapenv:Body'};
+            if ($body->{RetrieveProperties}) {
+                my $obj = $body->{RetrieveProperties}->{specSet}->{objectSet}->{obj};
+                $action .= "-VM-$obj->{'#text'}"
+                    if $obj->{'-type'} && $obj->{'-type'} eq 'VirtualMachine';
             }
             my $file = $dir . "/" . $action . ".soap";
 
@@ -519,7 +514,7 @@ foreach my $test (keys %tests) {
         }
     );
 
-    # ensure a calll to LWP::UserAgent->new() return our mock agent
+    # ensure a call to LWP::UserAgent->new() return our mock agent
     $module->mock(new => sub { return $mock; });
 
     my $vpbs = GLPI::Agent::SOAP::VMware->new(

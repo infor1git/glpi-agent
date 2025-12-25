@@ -4,8 +4,8 @@ package
 use parent 'Exporter';
 
 use constant {
-    PERL_VERSION       => "5.34.0",
-    PERL_BUILD_STEPS   => 8,
+    PERL_VERSION       => "5.36.0",
+    PERL_BUILD_STEPS   => 7,
 };
 
 our @EXPORT = qw(build_job PERL_VERSION PERL_BUILD_STEPS);
@@ -104,8 +104,6 @@ sub _build_steps {
                 'contrib/windows/packaging/win32_config.gc.tt'  => 'win32/config.gc',
                 'contrib/windows/packaging/agentexe.rc.tt'      => 'win32/perlexe.rc',
                 'contrib/windows/packaging/win32_config_H.gc'   => 'win32/config_H.gc',
-                # Perl 5.34.0: Optimization patch win32/win32.c
-                'contrib/windows/packaging/win32_win32.c.patch' => 'win32/win32.c',
             },
             license => { #SRC paths are relative to the perl src root
                 'Readme'   => '<image_dir>/licenses/perl/Readme',
@@ -117,10 +115,11 @@ sub _build_steps {
         {
             plugin => 'Perl::Dist::Strawberry::Step::UpgradeCpanModules',
             exceptions => [
-                # possible 'do' options: ignore_testfailure | skiptest | skip - e.g. 
+                # possible 'do' options: ignore_testfailure | skiptest | skip - e.g.
                 #{ do=>'ignore_testfailure', distribution=>'ExtUtils-MakeMaker-6.72' },
                 #{ do=>'ignore_testfailure', distribution=>qr/^IPC-Cmd-/ },
                 { do=>'ignore_testfailure', distribution=>qr/^Net-Ping-/ }, # 2.72 fails
+                { do=>'skip', distribution => qr/^Filter-/ }, # 1.61 fails
             ]
         },
         ### NEXT STEP 4 Install needed modules with agent dependencies #########
@@ -150,14 +149,15 @@ sub _build_steps {
                 # crypto
                 qw/ Crypt::DES Crypt::Rijndael /,
                 qw/ Digest-SHA /,
+                qw/ Digest-MD5 Digest-SHA1 Digest::HMAC /, # Required for SNMP v3 authentication
 
                 # date/time
                 qw/ DateTime DateTime::TimeZone::Local::Win32 /,
 
                 # GLPI-Agent deps
-                qw/ Text::Template UNIVERSAL::require UNIVERSAL::isa
-                    XML::TreePP XML::XPath Memoize Time::HiRes Compress::Zlib
-                    Parse::EDID JSON JSON::PP YAML::Tiny Parallel::ForkManager
+                qw/ Text::Template UNIVERSAL::require UNIVERSAL::isa Net::SSH2
+                    XML::LibXML Memoize Time::HiRes Compress::Zlib
+                    Parse::EDID Cpanel::JSON::XS YAML::Tiny Parallel::ForkManager
                     URI::Escape Net::NBName Thread::Queue Thread::Semaphore
                     Net::SNMP Net::SNMP::Security::USM Net::SNMP::Transport::IPv4::TCP
                     Net::SNMP::Transport::IPv6::TCP Net::SNMP::Transport::IPv6::UDP
@@ -210,13 +210,16 @@ sub _build_steps {
                 _movebin('libwinpthread-1.dll'),
                 _movebin('perl.exe'),
                 _movebin('perl'.$MAJOR.$MINOR.'.dll'),
+                # Also move DLLs required by modules
+                _movedll('libxml2-2'),
+                _movedll('liblzma-5'),
+                _movedll('libiconv-2'),
+                _movedll('libcrypto-1_1'.(_is64bit()?'-x64':'')),
+                _movedll('libssl-1_1'.(_is64bit()?'-x64':'')),
+                _movedll('zlib1'),
+                _movedll('libssh2-1'),
                 { do=>'removedir', args=>[ '<image_dir>/perl/bin' ] },
                 { do=>'movedir', args=>[ '<image_dir>/perl/newbin', '<image_dir>/perl/bin' ] },
-                # Move DLLs required by modules next to their calling *.xs.dll
-                _movedllto('libexpat-1', 'XML/Parser/Expat'),
-                _movedllto('libcrypto-1_1'.(_is64bit()?'-x64':''), 'Net/SSLeay'),
-                _movedllto('libssl-1_1'.(_is64bit()?'-x64':''), 'Net/SSLeay'),
-                _movedllto('zlib1', 'Net/SSLeay'),
                 { do=>'movefile', args=>[ '<image_dir>/c/bin/gmake.exe', '<image_dir>/perl/bin/gmake.exe' ] }, # Needed for tests
                 { do=>'removedir', args=>[ '<image_dir>/bin' ] },
                 { do=>'removedir', args=>[ '<image_dir>/c' ] },
@@ -229,6 +232,7 @@ sub _build_steps {
                 { do=>'copyfile', args=>[ 'contrib/windows/packaging/tools/x86/hdparm.exe', '<image_dir>/perl/bin' ] },
                 { do=>'copyfile', args=>[ 'contrib/windows/packaging/tools/'.$ARCH.'/7z.exe', '<image_dir>/perl/bin' ] },
                 { do=>'copyfile', args=>[ 'contrib/windows/packaging/tools/'.$ARCH.'/7z.dll', '<image_dir>/perl/bin' ] },
+                { do=>'copyfile', args=>[ 'contrib/windows/packaging/tools/'.$ARCH.'/GLPI-AgentMonitor-'.$ARCH.'.exe', '<image_dir>/perl/bin' ] },
             ],
         };
 }
@@ -282,14 +286,14 @@ sub _movebin {
     };
 }
 
-sub _movedllto {
+sub _movedll {
     my ($dll, $to) = @_;
     my $file = $dll.(_is64bit()?'__':'_').'.dll';
     return {
         do      => 'movefile',
         args    => [
             '<image_dir>/c/bin/'.$file,
-            '<image_dir>/perl/vendor/lib/auto/'.$to.'/'.$file
+            '<image_dir>/perl/newbin/'.$file
         ]
     };
 }

@@ -17,7 +17,7 @@ Build-Depends-Indep:
  libhttp-server-simple-authen-perl <!nocheck>,
  libio-capture-perl <!nocheck>,
  libipc-run-perl <!nocheck>,
- libjson-perl <!nocheck>,
+ libcpanel-json-xs-perl <!nocheck>,
  libjson-pp-perl <!nocheck>,
  libmodule-install-perl,
  libnet-ip-perl <!nocheck>,
@@ -37,10 +37,10 @@ Build-Depends-Indep:
  libuniversal-require-perl <!nocheck>,
  liburi-perl <!nocheck>,
  libwww-perl <!nocheck>,
- libxml-treepp-perl <!nocheck>,
- libxml-xpath-perl <!nocheck>,
+ libxml-libxml-perl <!nocheck>,
  libyaml-perl <!nocheck>,
  libossp-uuid-perl <!nocheck>,
+ libdatetime-perl <!nocheck>,
  perl,
  ucf
 Standards-Version: 4.5.1
@@ -58,23 +58,24 @@ Depends:
  lsb-base,
  libnet-cups-perl,
  libnet-ip-perl,
+ libnet-ssh2-perl,
  libwww-perl,
  libparse-edid-perl,
  libproc-daemon-perl,
+ libparallel-forkmanager-perl,
  libuniversal-require-perl,
  libfile-which-perl,
- libxml-treepp-perl,
- libxml-xpath-perl,
+ libxml-libxml-perl,
  libyaml-perl,
  libtext-template-perl,
- libjson-perl,
+ libcpanel-json-xs-perl,
  libjson-pp-perl,
- libossp-uuid-perl,
  pciutils,
  usbutils,
  libhttp-daemon-perl,
  libyaml-tiny-perl,
  libossp-uuid-perl,
+ libdatetime-perl,
  libsocket-getaddrinfo-perl
 Suggests: smartmontools, read-edid
 Recommends: libio-socket-ssl-perl, dmidecode, hdparm, fdisk | util-linux (<< 2.29.2-3~), net-tools
@@ -148,7 +149,8 @@ Depends:
  libdigest-hmac-perl,
  libnet-ip-perl,
  libnet-snmp-perl,
- libnet-nbname-perl
+ libnet-nbname-perl,
+ libparallel-forkmanager-perl
 Description: network device discovery for GLPI Agent
  This module scans your networks to quickly identify its hosts with SNMP,
  Echo Ping, TimeStamp ping, arp table lookup and NetBIOS request:

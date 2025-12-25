@@ -44,7 +44,8 @@ Mandatory Perl modules:
 * Net::IP
 * Text::Template
 * UNIVERSAL::require
-* XML::TreePP
+* XML::LibXML
+* Cpanel::JSON::XS
 
 Optional Perl modules:
 
@@ -110,7 +111,7 @@ Mandatory Perl modules:
 * Archive::Extract
 * Digest::SHA
 * File::Copy::Recursive
-* JSON::PP
+* Cpanel::JSON::XS
 * URI::Escape
 
 Mandatory Perl modules for P2P Support:
@@ -194,9 +195,3 @@ contains code from imvirt:
 * author: Thomas Liske <liske@ibh.de>
 * copyright: 2008 IBH IT-Service GmbH <http://www.ibh.de/>
 * License: GPLv2+
-
-ToolBox HTTP daemon plugin uses flatpickr lightweight and powerful datetime picker js library.
-* author: Gregory Petrosyan
-* url: <https://flatpickr.js.org/>
-* copyright: 2017 Gregory Petrosyan
-* License: License MIT

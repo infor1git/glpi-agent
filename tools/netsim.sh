@@ -174,6 +174,7 @@ function _load_environment {
         [ "$SYSTEM_AGENT" == "1" ] && let SYSTEM=1
     fi
     if [ ! -e "$NETSIMDIR/encrypt/teclib.pubkey.pem" ];then
+        [ -d "$NETSIMDIR/encrypt" ] || mkdir -p "$NETSIMDIR/encrypt"
         # Storing Teclib public to securely share walks in backup
         cat >"$NETSIMDIR/encrypt/teclib.pubkey.pem" <<TECLIB_PUBLIC_KEY
 -----BEGIN PUBLIC KEY-----
@@ -590,7 +591,7 @@ function _import {
             return
         fi
     fi
-    for file in $FILES
+    for file in $_FILES
     do
         if [ -e "$file" ]; then
             name="${file##*/}"
@@ -762,7 +763,7 @@ function _walk {
 function _pub_encrypt {
     if [ -z "$ENCRYPT" ]; then
         stream "Archive content encryption not enabled, can't encrypt"
-    elif [ ! -e "encrypt/$ENCRYPT.privkey.pem" ]; then
+    elif [ ! -e "encrypt/$ENCRYPT.pubkey.pem" ]; then
         stream "Archive content public key for '$ENCRYPT' authority is missing, can't encrypt"
     else
         openssl pkeyutl -encrypt -in "$1" -pubin -inkey "encrypt/$ENCRYPT.pubkey.pem" -out "$1.$ENCRYPT" 2>&1 | _stream_pipe;

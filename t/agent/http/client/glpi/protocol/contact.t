@@ -4,7 +4,7 @@ use strict;
 use warnings;
 use lib 't/lib';
 
-use JSON::PP;
+use Cpanel::JSON::XS;
 use English qw(-no_match_vars);
 use Test::Deep;
 use Test::Exception;
@@ -150,7 +150,7 @@ my %answers = (
     },
 );
 
-plan tests => 6 + 3*keys(%answers);
+plan tests => 7 + 3 * (keys %answers);
 
 my $logger = GLPI::Agent::Logger->new(
     logger => [ 'Test' ]
@@ -185,7 +185,7 @@ lives_ok {
 
 my $decoded_content;
 lives_ok {
-    $decoded_content = JSON::PP::decode_json($content);
+    $decoded_content = decode_json($content);
 } "Contact request: content must be a JSON";
 
 my $expected_content = {

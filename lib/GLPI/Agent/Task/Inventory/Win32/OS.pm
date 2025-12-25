@@ -26,7 +26,7 @@ sub doInventory {
     my ($operatingSystem) = getWMIObjects(
         class      => 'Win32_OperatingSystem',
         properties => [ qw/
-            Caption Version CSDVersion LastBootUpTime InstallDate
+            Caption Version CSDVersion LastBootUpTime InstallDate BuildNumber
         / ]
     );
 
@@ -44,11 +44,6 @@ sub doInventory {
     my $installDate = getFormatedWMIDateTime($operatingSystem->{InstallDate});
     $installDate = _getInstallDate() unless $installDate;
 
-    # Finally get the name through native Win32::API if local inventory and as
-    # WMI DB is sometimes broken
-    my $hostname = $computerSystem->{DNSHostName} || $computerSystem->{Name};
-    $hostname = getHostname(short => 1) unless $hostname || $inventory->getRemote();
-
     my $os = {
         NAME           => "Windows",
         ARCH           => $arch,
@@ -56,13 +51,19 @@ sub doInventory {
         BOOT_TIME      => $boottime,
         KERNEL_VERSION => $operatingSystem->{Version},
         FULL_NAME      => $operatingSystem->{Caption},
-        SERVICE_PACK   => $operatingSystem->{CSDVersion}
     };
 
-    # Support ReleaseID as Operating system version for Windows 10
-    my $releaseid = getRegistryValue(
-        path => 'HKEY_LOCAL_MACHINE/Software/Microsoft/Windows NT/CurrentVersion/ReleaseId'
-    );
+    # UBR (Update Build Revision) replace Service Pack after XP/2003
+    my $UBR = hex2dec(getRegistryValue(
+        path => 'HKEY_LOCAL_MACHINE/Software/Microsoft/Windows NT/CurrentVersion/UBR',
+        # Needed for remote inventory
+        method  => "GetDWORDValue",
+    ));
+    if ($UBR) {
+        $os->{SERVICE_PACK} = $operatingSystem->{BuildNumber} ? $operatingSystem->{BuildNumber}.".$UBR" : "$UBR";
+    } elsif (defined($operatingSystem->{CSDVersion})) {
+        $os->{SERVICE_PACK} = $operatingSystem->{CSDVersion};
+    }
 
     # Support DisplayVersion as Operating system version from Windows 10 20H1
     my $displayversion = getRegistryValue(
@@ -70,8 +71,13 @@ sub doInventory {
     );
     if ($displayversion) {
         $os->{VERSION} = $displayversion;
-    } elsif ($releaseid) {
-        $os->{VERSION} = $releaseid;
+    } else {
+        # Support ReleaseID as Operating system version for Windows 10
+        my $releaseid = getRegistryValue(
+            path => 'HKEY_LOCAL_MACHINE/Software/Microsoft/Windows NT/CurrentVersion/ReleaseId'
+        );
+        $os->{VERSION} = $releaseid
+            if $releaseid;
     }
 
     if ($computerSystem->{Domain}) {

@@ -8,6 +8,7 @@ env:
   publish_development_build: no
   number_of_development_build_to_keep: 3
   number_of_nightly_build_to_keep: 3
+  macosx_notarize_support: yes
 
 on:
   push:
@@ -16,6 +17,13 @@ on:
       - develop
   schedule:
     - cron: '10 1 * * *'
+  workflow_dispatch:
+    inputs:
+      nightly:
+        description: 'Nightly publishing'
+        required: true
+        default: true
+        type: boolean
 
 jobs:
   setup-release:
@@ -36,98 +44,118 @@ jobs:
       macosx-notarization: ${{ steps.set-version.outputs.macosx-notarization }}
 
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
     - name: Set version
       id: set-version
       run: |
-        if [ -n "$CST_USERNAME" ]; then
-            echo "::set-output name=win32-signing::yes"
+        if [ "${{ vars.WIN32_SIGNING }}" == "no" ]; then
+            echo "win32-signing=no" >>$GITHUB_OUTPUT
+        elif [ -n "$CODESIGN_COMMAND" ]; then
+            echo "win32-signing=alt" >>$GITHUB_OUTPUT
+        elif [ -n "$CST_USERNAME" ]; then
+            echo "win32-signing=cst" >>$GITHUB_OUTPUT
         else
-            echo "::set-output name=win32-signing::no"
+            echo "win32-signing=no" >>$GITHUB_OUTPUT
         fi
         if [ -n "$APPSIGNID" -a -n "$INSTSIGNID" ]; then
-            echo "::set-output name=macosx-signing::yes"
-            NOTARIZE="yes"
+            echo "macosx-signing=yes" >>$GITHUB_OUTPUT
+            if [ "${{ env.macosx_notarize_support }}" == "yes" -a "${{ vars.MACOSX_NOTARIZE }}" != "no" ]; then
+                NOTARIZE="yes"
+            else
+                NOTARIZE="no"
+            fi
         else
-            echo "::set-output name=macosx-signing::no"
+            echo "macosx-signing=no" >>$GITHUB_OUTPUT
+            NOTARIZE="no"
         fi
         if [ -z "${GITHUB_REF##*refs/tags/*}" ]; then
+            # Abort publishing if MACOSX_SIGNING variable was set to "no"
+            if [ "${{ vars.MACOSX_SIGNING }}" == "no" -a -n "$APPSIGNID" -a -n "$INSTSIGNID" ]; then
+                echo "MACOSX_SIGNING has been disabled in GH variables. Fix it before publishing." >&2
+                exit 1
+            fi
+            # Abort publishing if MACOSX_NOTARIZE variable was set to "no"
+            if [ "${{ vars.MACOSX_NOTARIZE }}" == "no" -a "$NOTARIZE" == "yes" ]; then
+                echo "MACOSX_NOTARIZE has been disabled in GH variables. Fix it before publishing." >&2
+                exit 1
+            fi
             VERSION="${GITHUB_REF#*refs/tags/}"
             echo "New release on $VERSION $tag"
-            echo "::set-output name=create-release::yes"
-            echo "::set-output name=build::yes"
-            echo "::set-output name=tag_name::$VERSION"
+            echo "create-release=yes" >>$GITHUB_OUTPUT
+            echo "build=yes" >>$GITHUB_OUTPUT
+            echo "tag_name=$VERSION" >>$GITHUB_OUTPUT
         else
             VERSION=$(perl -Ilib -MGLPI::Agent::Version -e 'print $GLPI::Agent::Version::VERSION')
             VERSION=${VERSION%-dev}-git${GITHUB_SHA:0:8}
-            if [ "${{ github.event_name }}" = "schedule" -o "${{ env.publish_development_build }}" = "yes" ]; then
-                if [ "${{ github.event_name }}" = "schedule" ]; then
+            if [ "${{ github.event_name }}" = "schedule" -o "${{ inputs.nightly }}" = "true" -o "${{ env.publish_development_build }}" = "yes" ]; then
+                if [ "${{ github.event_name }}" = "schedule" -o "${{ inputs.nightly }}" = "true" ]; then
                     TYPE=nightly
                     if [ -z "$PUBLISHING_TOKEN" ]; then
                         echo "No PUBLISHING_TOKEN defined to publish GLPI-Agent nightly builds"
-                        echo "::set-output name=create-release::no"
-                        echo "::set-output name=build::no"
+                        echo "create-release=no" >>$GITHUB_OUTPUT
+                        echo "build=no" >>$GITHUB_OUTPUT
                         exit 0
                     elif gh api /repos/{owner}/glpi-project.github.io/git/refs/tags/glpi-agent-development-$VERSION --silent 2>/dev/null; then
                         echo "GLPI-Agent v$VERSION still published as development build"
-                        echo "::set-output name=create-release::no"
-                        echo "::set-output name=build::no"
+                        echo "create-release=no" >>$GITHUB_OUTPUT
+                        echo "build=no" >>$GITHUB_OUTPUT
                         exit 0
                     fi
                 else
                     TYPE=development
                 fi
                 SKIP_NIGHTLY="${{ env.number_of_nightly_build_to_keep }} $TYPE"
-                # For nightly, we also check if we had any commit during the last 24 hours
-                if [ "$SKIP_NIGHTLY" = "0 nightly" -o -z "$( git rev-list -n 1 --after="24 hours" ${{ github.sha }} )" ]; then
+                # For nightly, we also check if we had any commit during the last 24 hours unless it is a manually forced run for which INPUT_NIGHTLY should be set
+                if [ -z "$INPUT_NIGHTLY" -a "$SKIP_NIGHTLY" = "0 nightly" -o -z "$( git rev-list -n 1 --after="24 hours" ${{ github.sha }} )" ]; then
                     echo "No nightly release needed"
-                    echo "::set-output name=create-release::no"
-                    echo "::set-output name=build::no"
+                    echo "create-release=no" >>$GITHUB_OUTPUT
+                    echo "build=no" >>$GITHUB_OUTPUT
                 else
                     echo "New $TYPE release as $VERSION version"
-                    echo "::set-output name=create-release::${{ env.publish_development_build }}"
-                    echo "::set-output name=build::yes"
-                    echo "::set-output name=tag_name::$TYPE-$VERSION"
+                    echo "create-release=${{ env.publish_development_build }}" >>$GITHUB_OUTPUT
+                    echo "build=yes" >>$GITHUB_OUTPUT
+                    echo "tag_name=$TYPE-$VERSION" >>$GITHUB_OUTPUT
                 fi
             else
                 echo "Just building $VERSION version"
-                echo "::set-output name=create-release::no"
-                echo "::set-output name=build::yes"
-                echo "::set-output name=tag_name::development-$VERSION"
+                echo "create-release=no" >>$GITHUB_OUTPUT
+                echo "build=yes" >>$GITHUB_OUTPUT
+                echo "tag_name=development-$VERSION" >>$GITHUB_OUTPUT
                 NOTARIZE="no"
             fi
         fi
-        echo "::set-output name=version::$VERSION"
+        echo "version=$VERSION" >>$GITHUB_OUTPUT
         case "${VERSION#*-}" in
             $VERSION)
-                echo "::set-output name=revname::v$VERSION"
-                echo "::set-output name=prerelease::false"
+                echo "revname=v$VERSION" >>$GITHUB_OUTPUT
+                echo "prerelease=false" >>$GITHUB_OUTPUT
                 ;;
             test*)
-                echo "::set-output name=revname::v${VERSION%-test*} Test release ${VERSION#*-test}"
-                echo "::set-output name=prerelease::true"
+                echo "revname=v${VERSION%-test*} Test release ${VERSION#*-test}" >>$GITHUB_OUTPUT
+                echo "prerelease=true" >>$GITHUB_OUTPUT
                 ;;
             beta*)
-                echo "::set-output name=revname::v${VERSION%-beta*} Beta release ${VERSION#*-beta}"
-                echo "::set-output name=prerelease::true"
+                echo "revname=v${VERSION%-beta*} Beta release ${VERSION#*-beta}" >>$GITHUB_OUTPUT
+                echo "prerelease=true" >>$GITHUB_OUTPUT
                 ;;
             *)
-                echo "::set-output name=revname::v$VERSION Development release"
-                echo "::set-output name=prerelease::true"
+                echo "revname=v$VERSION Development release" >>$GITHUB_OUTPUT
+                echo "prerelease=true" >>$GITHUB_OUTPUT
                 ;;
         esac
         # Check if MacOSX packaging notarization is required
-        echo "::set-output name=macosx-notarization::$NOTARIZE"
+        echo "macosx-notarization=$NOTARIZE" >>$GITHUB_OUTPUT
         # Set user and mail for nightly release
-        echo "::set-output name=user-name::$(git log --format='%an' HEAD^!)"
-        echo "::set-output name=user-email::$(git log --format='%ae' HEAD^!)"
+        echo "user-name=$(git log --format='%an' HEAD^!)" >>$GITHUB_OUTPUT
+        echo "user-email=$(git log --format='%ae' HEAD^!)" >>$GITHUB_OUTPUT
       shell: bash
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         PUBLISHING_TOKEN: ${{ secrets.PUBLISHING_TOKEN }}
+        CODESIGN_COMMAND: ${{ secrets.CODESIGN_COMMAND }}
         CST_USERNAME: ${{ secrets.CST_USERNAME }}
-        APPSIGNID: ${{ secrets.MACOSX_APPSIGNID }}
-        INSTSIGNID: ${{ secrets.MACOSX_INSTSIGNID }}
+        APPSIGNID: ${{ vars.MACOSX_APPSIGNID }}
+        INSTSIGNID: ${{ vars.MACOSX_INSTSIGNID }}
     - name: Generate release description
       id: github-release-body
       if: ${{ steps.set-version.outputs.create-release == 'yes' }}
@@ -136,14 +164,14 @@ jobs:
       shell: bash
     - name: Create Tagged Release
       id: create-tagged-release
-      uses: actions/create-release@v1
+      uses: ncipollo/release-action@v1
       if: ${{ steps.set-version.outputs.create-release == 'yes' }}
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # This token is provided by Actions, you do not need to create your own token
       with:
-        tag_name: ${{ steps.set-version.outputs.tag_name }}
-        release_name: GLPI Agent ${{ steps.set-version.outputs.revname }}
-        body_path: release-description.md
+        tag: ${{ steps.set-version.outputs.tag_name }}
+        name: GLPI Agent ${{ steps.set-version.outputs.revname }}
+        bodyFile: release-description.md
         draft: true
         prerelease: ${{ steps.set-version.outputs.prerelease }}
 
@@ -158,14 +186,14 @@ jobs:
     needs: setup-release
 
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
     - name: Create folders for cached datas
       run: |
         mkdir C:\Strawberry-perl-for-GLPI-Agent_build\restore
         mkdir C:\Strawberry-perl-for-GLPI-Agent_build\tools
       shell: cmd
     - name: Restore points cache
-      uses: pat-s/always-upload-cache@v2
+      uses: actions/cache@v4
       with:
         path: |
             C:/Strawberry-perl-for-GLPI-Agent_build/tools
@@ -175,7 +203,6 @@ jobs:
       if: success() || failure()
       run: |
         dir C:\Strawberry-perl-for-GLPI-Agent_build\restore
-        dir C:\Strawberry-perl-for-GLPI-Agent_build\tools
       shell: cmd
     - name: Update environment
       run: |
@@ -199,11 +226,11 @@ jobs:
       run: |
         cpanm --notest --verbose Perl::Dist::Strawberry
       shell: cmd
-    - name: Fix Perl::Dist::Strawberry for perl 5.34
+    - name: Fix Perl::Dist::Strawberry for perl
       run: |
         perl -i -pe "s/makefile.mk/Makefile/" C:\Strawberry\perl\site\lib\Perl\Dist\Strawberry\Step\InstallPerlCore.pm
       shell: cmd
-    - name: Fix Perl::Dist::Strawberry to support patching perl 5.34
+    - name: Fix Perl::Dist::Strawberry to support patching perl
       run: |
         perl -i -pe "s/use Text::Diff;/use Text::Diff;use Text::Patch;/" C:\Strawberry\perl\site\lib\Perl\Dist\Strawberry\Step.pm
       shell: cmd
@@ -211,8 +238,8 @@ jobs:
       run: |
         perl contrib\windows\glpi-agent-packaging.pl --arch ${{ matrix.arch }}
       shell: cmd
-    - name: MSI Signing
-      if: ${{ needs.setup-release.outputs.win32-signing == 'yes' }}
+    - name: MSI Signing (CST)
+      if: ${{ needs.setup-release.outputs.win32-signing == 'cst' }}
       run: |
         perl tools\msi-signing.pl "C:\Strawberry-perl-for-GLPI-Agent_build" "GLPI-Agent-${{ needs.setup-release.outputs.version }}-${{ matrix.arch }}.msi"
       shell: cmd
@@ -221,6 +248,24 @@ jobs:
         CST_PASSWORD: ${{ secrets.CST_PASSWORD }}
         CST_SECRET: ${{ secrets.CST_SECRET }}
         CST_CREDENTIALID: ${{ secrets.CST_CREDENTIALID }}
+    - name: MSI Signing (ALT)
+      if: ${{ needs.setup-release.outputs.win32-signing == 'alt' }}
+      run: |
+        cd "C:\\Strawberry-perl-for-GLPI-Agent_build"
+        umask 0077
+        mkdir ~/.ssh
+        echo "$CODESIGN_KNOWNHOST"            > ~/.ssh/known_hosts
+        echo "$CODESIGN_PRIVATE"              > private.key
+        umask 0002
+        MSI="GLPI-Agent-${{ needs.setup-release.outputs.version }}-${{ matrix.arch }}.msi"
+        cat "output\\$MSI" | $CODESIGN_COMMAND codesign "$MSI" > "$MSI"
+        rm -f private.key ~/.ssh/known_hosts "output\\$MSI"
+        mv -vf "$MSI" "output\\$MSI"
+      shell: bash
+      env:
+        CODESIGN_KNOWNHOST: ${{ secrets.CODESIGN_KNOWNHOST }}
+        CODESIGN_COMMAND: ${{ secrets.CODESIGN_COMMAND }}
+        CODESIGN_PRIVATE: ${{ secrets.CODESIGN_PRIVATE }}
     - name: List generated files
       if: success() || failure()
       run: |
@@ -228,20 +273,41 @@ jobs:
       shell: cmd
     - name: Upload windows built artifacts
       if: success() || failure()
-      uses: actions/upload-artifact@v2
+      uses: actions/upload-artifact@v4
       with:
-        name: Windows-Build
+        name: Windows-Build-${{ matrix.arch }}
         path: C:\Strawberry-perl-for-GLPI-Agent_build\output
     - name: Upload debug MSI-Build artifacts
       if: failure() #success() || failure() # Only enable on failure or when debugging is required
-      uses: actions/upload-artifact@v2
+      uses: actions/upload-artifact@v4
       with:
-        name: MSI-Build-Debug
+        name: MSI-Build-Debug-${{ matrix.arch }}
         path: C:\Strawberry-perl-for-GLPI-Agent_build\build\msi
+    - name: VirusTotal Scan
+      uses: crazy-max/ghaction-virustotal@v3
+      if: ${{ needs.setup-release.outputs.create-release == 'yes' || startsWith(needs.setup-release.outputs.tag_name, 'nightly') }}
+      with:
+        vt_api_key: ${{ secrets.VT_API_KEY }}
+        files: |
+          C:\Strawberry-perl-for-GLPI-Agent_build\output\GLPI-Agent-${{ needs.setup-release.outputs.version }}-${{ matrix.arch }}.msi
+          C:\Strawberry-perl-for-GLPI-Agent_build\output\glpi-agent-${{ needs.setup-release.outputs.version }}-${{ matrix.arch }}.zip
+    - name: VirusTotal Report Analysis
+      if: ${{ vars.VT_SKIP_REPORT_ANALYSIS != 'yes' && ( needs.setup-release.outputs.create-release == 'yes' || startsWith(needs.setup-release.outputs.tag_name, 'nightly') ) }}
+      run: |
+        perl tools\virustotal-report-analysis.pl --path C:\Strawberry-perl-for-GLPI-Agent_build\output GLPI-Agent-${{ needs.setup-release.outputs.version }}-${{ matrix.arch }}.msi glpi-agent-${{ needs.setup-release.outputs.version }}-${{ matrix.arch }}.zip
+      shell: cmd
+      env:
+        VT_API_KEY: ${{ secrets.VT_API_KEY }}
+    - name: Upload VirusTotal Report
+      if: ${{ vars.VT_SKIP_REPORT_ANALYSIS != 'yes' && ( needs.setup-release.outputs.create-release == 'yes' || startsWith(needs.setup-release.outputs.tag_name, 'nightly') ) }}
+      uses: actions/upload-artifact@v4
+      with:
+        name: VirusTotal-Report-${{ matrix.arch }}
+        path: C:\Strawberry-perl-for-GLPI-Agent_build\output\*.json
     - name: Upload Portable Archive Asset
       id: upload-portable-archive-asset
       if: ${{ needs.setup-release.outputs.create-release == 'yes' }}
-      uses: actions/upload-release-asset@v1
+      uses: fiddlermikey/upload-release-assets@d33b61be358467363a2fd6532baabd54722875ed
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
@@ -252,7 +318,7 @@ jobs:
     - name: Upload MSI Installer Asset
       id: upload-msi-asset
       if: ${{ needs.setup-release.outputs.create-release == 'yes' }}
-      uses: actions/upload-release-asset@v1
+      uses: fiddlermikey/upload-release-assets@d33b61be358467363a2fd6532baabd54722875ed
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
@@ -267,18 +333,18 @@ jobs:
     strategy:
       matrix:
         include:
-          - os: macos-10.15
+          - os: macos-latest
             arch: x86_64
-          - os: macos-11
+          - os: macos-latest
             arch: arm64
 
     if: ${{ needs.setup-release.outputs.build == 'yes' }}
     needs: setup-release
 
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
     - name: Restore points cache
-      uses: pat-s/always-upload-cache@v2
+      uses: actions/cache@v4
       with:
         path: |
           contrib/macosx/*.gz
@@ -292,15 +358,15 @@ jobs:
         key: macosx-packaging-restore-points-${{ matrix.os }}-${{ matrix.arch }}-${{ hashFiles('contrib/macosx/glpi-agent-packaging.sh') }}
     - name: Import Application Signing Cert
       id: application-signing-cert
-      uses: apple-actions/import-codesign-certs@v1
-      if: ${{ needs.setup-release.outputs.macosx-signing == 'yes' }}
+      uses: apple-actions/import-codesign-certs@v2
+      if: ${{ needs.setup-release.outputs.macosx-signing == 'yes' && vars.MACOSX_SIGNING != 'no' }}
       with:
         p12-file-base64: ${{ secrets.MACOSX_APPLICATION_P12 }}
         p12-password: ${{ secrets.MACOSX_P12_PASSWORD }}
     - name: Import Installer Signing Cert
       id: installer-signing-cert
-      uses: apple-actions/import-codesign-certs@v1
-      if: ${{ needs.setup-release.outputs.macosx-signing == 'yes' }}
+      uses: apple-actions/import-codesign-certs@v2
+      if: ${{ needs.setup-release.outputs.macosx-signing == 'yes' && vars.MACOSX_SIGNING != 'no' }}
       with:
         p12-file-base64: ${{ secrets.MACOSX_INSTALLER_P12 }}
         p12-password: ${{ secrets.MACOSX_P12_PASSWORD }}
@@ -308,12 +374,32 @@ jobs:
         keychain-password: ${{ steps.application-signing-cert.outputs.keychain-password }}
     - name: Build package
       run: |
-        ./contrib/macosx/glpi-agent-packaging.sh --arch ${{ matrix.arch }} --notarize ${{ needs.setup-release.outputs.macosx-notarization }}
+        # Handle repository variables to eventually disable code signing and notarization
+        if [ -n "${{ vars.MACOSX_SIGNING }}" -o -n "${{ vars.MACOSX_NOTARIZE }}" ]; then
+          echo "GH Variables:"
+          if [ -n "${{ vars.MACOSX_SIGNING }}" ]; then
+            echo " - MACOSX_SIGNING : ${{ vars.MACOSX_SIGNING }}"
+            if [ "${{ vars.MACOSX_SIGNING }}" == "no" ]; then
+              MACOSX_NOTARIZE="no"
+              unset APPSIGNID INSTSIGNID
+            fi
+          fi
+          if [ -n "${{ vars.MACOSX_NOTARIZE }}" ]; then
+            echo " - MACOSX_NOTARIZE: ${{ vars.MACOSX_NOTARIZE }}"
+            if [ "${{ vars.MACOSX_NOTARIZE }}" == "no" ]; then
+              MACOSX_NOTARIZE="no"
+              unset NOTARIZE_USER NOTARIZE_PASSWORD NOTARIZE_TEAMID
+            fi
+          fi
+        fi
+        ./contrib/macosx/glpi-agent-packaging.sh --arch ${{ matrix.arch }} --notarize $MACOSX_NOTARIZE
       env:
-        APPSIGNID: ${{ secrets.MACOSX_APPSIGNID }}
-        INSTSIGNID: ${{ secrets.MACOSX_INSTSIGNID }}
+        APPSIGNID: ${{ vars.MACOSX_APPSIGNID }}
+        INSTSIGNID: ${{ vars.MACOSX_INSTSIGNID }}
         NOTARIZE_USER: ${{ secrets.MACOSX_NOTARIZE_USER }}
         NOTARIZE_PASSWORD: ${{ secrets.MACOSX_NOTARIZE_PASSWORD }}
+        NOTARIZE_TEAMID: ${{ vars.MACOSX_NOTARIZE_TEAMID }}
+        MACOSX_NOTARIZE: ${{ needs.setup-release.outputs.macosx-notarization }}
       shell: bash
     - name: List generated files
       if: success() || failure()
@@ -322,15 +408,15 @@ jobs:
       shell: bash
     - name: Upload MacOSX built artifacts
       if: success() || failure()
-      uses: actions/upload-artifact@v2
+      uses: actions/upload-artifact@v4
       with:
-        name: MacOSX-Build
+        name: MacOSX-Build-${{ matrix.arch }}
         path: |
           contrib/macosx/build/*.pkg
           contrib/macosx/build/*.dmg
     - name: Upload MacOSX Perl building debug artifacts
       if: success() || failure()
-      uses: actions/upload-artifact@v2
+      uses: actions/upload-artifact@v4
       with:
         name: MacOSX-Perl-Config-${{ matrix.arch }}
         path: |
@@ -344,7 +430,7 @@ jobs:
     - name: Upload MacOSX PKG installer
       id: upload-macosx-pkg-asset
       if: ${{ needs.setup-release.outputs.create-release == 'yes' }}
-      uses: actions/upload-release-asset@v1
+      uses: fiddlermikey/upload-release-assets@d33b61be358467363a2fd6532baabd54722875ed
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
@@ -355,7 +441,7 @@ jobs:
     - name: Upload MacOSX DMG installer image
       id: upload-macosx-dmg-asset
       if: ${{ needs.setup-release.outputs.create-release == 'yes' }}
-      uses: actions/upload-release-asset@v1
+      uses: fiddlermikey/upload-release-assets@d33b61be358467363a2fd6532baabd54722875ed
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
@@ -372,20 +458,20 @@ jobs:
     needs: setup-release
 
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
     - uses: snapcore/action-build@v1
       id: snapcraft
       env:
         TERM: ${{ env.TERM }}:${{ needs.setup-release.outputs.version }}
     - name: Upload Snap built artifacts
-      uses: actions/upload-artifact@v2
+      uses: actions/upload-artifact@v4
       with:
         name: Snap-Build
         path: ${{ steps.snapcraft.outputs.snap }}
     - name: Upload Snap Package
       id: upload-linux-snap-asset
       if: ${{ needs.setup-release.outputs.create-release == 'yes' }}
-      uses: actions/upload-release-asset@v1
+      uses: fiddlermikey/upload-release-assets@d33b61be358467363a2fd6532baabd54722875ed
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
@@ -402,35 +488,33 @@ jobs:
     needs: setup-release
 
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
     - name: Install build dependencies packages
       run: |
         sudo apt update
         sudo apt -y install dpkg-dev debhelper libmodule-install-perl      \
           libclone-perl libdigest-sha-perl libfile-copy-recursive-perl     \
           libfile-which-perl libhttp-cookies-perl libhttp-daemon-perl      \
-          libhttp-proxy-perl libhttp-server-simple-perl                    \
+          libhttp-proxy-perl libhttp-server-simple-perl libdatetime-perl   \
           libhttp-server-simple-authen-perl libio-capture-perl             \
-          libipc-run-perl libjson-perl libjson-pp-perl libnet-ip-perl      \
+          libipc-run-perl libjson-pp-perl libnet-ip-perl                   \
           libnet-snmp-perl libio-socket-ssl-perl libparse-edid-perl        \
           libproc-daemon-perl libparallel-forkmanager-perl                 \
           libtest-compile-perl libtest-deep-perl libtest-nowarnings-perl   \
           libtest-exception-perl libtest-mockmodule-perl                   \
           libtest-mockobject-perl libtext-template-perl                    \
           libsocket-getaddrinfo-perl libuniversal-require-perl liburi-perl \
-          libwww-perl libxml-treepp-perl libxml-xpath-perl libyaml-perl    \
-          libossp-uuid-perl devscripts
+          libwww-perl libxml-libxml-perl libyaml-perl                      \
+          libossp-uuid-perl libcpanel-json-xs-perl devscripts
       shell: bash
     - name: Build debian packages
       id: debbuild
       run: |
-        echo "::set-output name=debpath:: $(dirname $PWD)"
+        echo "debpath=$(dirname $PWD)" >>$GITHUB_OUTPUT
         # make -gitXXXXXXXX release when not tagged
         if [ -z "${VERSION##*-*}" ]; then
             tools/make-release.sh --no-git $VERSION
         fi
-        # DH_COMPAT is needed on current ubuntu-latest, it could be removed after switching to Ubuntu 20.04
-        export DH_COMPAT=11
         dpkg-buildpackage -d -b --no-sign
       shell: bash
       env:
@@ -441,7 +525,7 @@ jobs:
         lintian --profile debian --show-overrides -L ">=pedantic"
       shell: bash
     - name: Upload built deb artifacts
-      uses: actions/upload-artifact@v2
+      uses: actions/upload-artifact@v4
       with:
         name: Debian-Build
         path: |
@@ -465,7 +549,7 @@ jobs:
     needs: setup-release
 
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
     - name: Install build dependencies packages
       run: |
         sudo apt update
@@ -491,13 +575,13 @@ jobs:
             glpi-agent-task-esx glpi-agent-cron
       shell: bash
     - name: Upload built rpm artifacts
-      uses: actions/upload-artifact@v2
+      uses: actions/upload-artifact@v4
       with:
         name: RPM-Build
         path: |
           ${{ steps.rpmbuild.outputs.rpmdir }}/noarch/*.rpm
     - name: Upload rpm sources artifacts
-      uses: actions/upload-artifact@v2
+      uses: actions/upload-artifact@v4
       with:
         name: RPM-Sources
         path: |
@@ -521,14 +605,14 @@ jobs:
     needs: [ setup-release, linux-snap-packaging, linux-debian-packaging, linux-rpm-packaging ]
 
     steps:
-    - uses: actions/checkout@v2
-    - uses: actions/download-artifact@v2
+    - uses: actions/checkout@v4
+    - uses: actions/download-artifact@v4
       with:
         name: RPM-Build
-    - uses: actions/download-artifact@v2
+    - uses: actions/download-artifact@v4
       with:
         name: Debian-Build
-    - uses: actions/download-artifact@v2
+    - uses: actions/download-artifact@v4
       with:
         name: Snap-Build
     - name: Build installer
@@ -548,7 +632,7 @@ jobs:
       env:
         VERSION: ${{ needs.setup-release.outputs.version }}
     - name: Upload built installer artifacts
-      uses: actions/upload-artifact@v2
+      uses: actions/upload-artifact@v4
       with:
         name: Linux-Installer-Build
         path: |
@@ -562,15 +646,160 @@ jobs:
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  linux-appimage:
+
+    runs-on: ubuntu-latest
+
+    if: ${{ needs.setup-release.outputs.build == 'yes' }}
+    needs: [ setup-release, linux-debian-packaging ]
+
+    steps:
+    - uses: actions/checkout@v4
+    # We use AppImage Builder development version as 1.1 is failing
+    - name: Install AppImage Builder development version
+      id: install-appimage-builder
+      run: |
+        pip3 install git+https://github.com/AppImageCrafters/appimage-builder.git
+      shell: bash
+    - uses: actions/download-artifact@v4
+      with:
+        name: Debian-Build
+    - name: Make AppImage
+      id: make-appimage
+      run: |
+        contrib/unix/make-linux-appimage.sh --version $VERSION
+      shell: bash
+      env:
+        VERSION: ${{ needs.setup-release.outputs.version }}
+    - name: Quick tests
+      run: |
+        echo ====
+        echo Install libfuse2 as required by AppImage
+        sudo apt update
+        sudo apt -y install libfuse2
+        echo ====
+        echo Installer version:
+        ./glpi-agent-$VERSION-x86_64.AppImage --version
+        echo ====
+        echo Embedded perl version:
+        ./glpi-agent-$VERSION-x86_64.AppImage --perl --version
+        echo ====
+        echo Embedded GLPI Agent version:
+        ./glpi-agent-$VERSION-x86_64.AppImage --script=glpi-agent --version
+        echo ====
+      env:
+        VERSION: ${{ needs.setup-release.outputs.version }}
+    - name: Upload built installer artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: Linux-AppImage-Build
+        path: |
+          *.AppImage
+          *.AppImage.zsync
+    - name: Upload linux AppImage
+      id: upload-linux-appimage-assets
+      if: ${{ needs.setup-release.outputs.create-release == 'yes' }}
+      run: |
+        unset FILES
+        for file in *.AppImage{,.zsync}
+        do
+            [ -e "$file" ] && FILES="$FILES $file"
+        done
+        gh release upload ${{ needs.setup-release.outputs.tag_name }} $FILES
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  sources:
+
+    runs-on: ubuntu-latest
+
+    if: ${{ needs.setup-release.outputs.build == 'yes' }}
+    needs: setup-release
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: Install build dependencies packages
+      run: |
+        sudo apt update
+        sudo apt -y install libmodule-install-perl libuniversal-require-perl \
+          libwww-perl libdigest-sha-perl
+      shell: bash
+    - name: Build sources archive
+      id: srcbuild
+      run: |
+        # make -gitXXXXXXXX release when not tagged
+        if [ -z "${VERSION##*-*}" ]; then
+            tools/make-release.sh --no-git --no-deb-changelog $VERSION
+        fi
+        perl Makefile.PL
+        make manifest
+        make
+        make dist DISTVNAME=GLPI-Agent-$VERSION
+      shell: bash
+      env:
+        VERSION: ${{ needs.setup-release.outputs.version }}
+    - name: Upload built archive artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: Sources
+        path: |
+          GLPI-Agent-*.tar.gz
+    - name: Upload Sources Archive
+      id: upload-sources-asset
+      if: ${{ needs.setup-release.outputs.create-release == 'yes' }}
+      run: |
+        gh release upload ${{ needs.setup-release.outputs.tag_name }} GLPI-Agent-*.tar.gz
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
   publish-release:
 
     runs-on: ubuntu-latest
 
     if: ${{ needs.setup-release.outputs.create-release == 'yes' }}
-    needs: [ setup-release, windows-packaging, macosx-packaging, linux-snap-packaging, linux-debian-packaging, linux-rpm-packaging, linux-installer ]
+    needs: [ setup-release, windows-packaging, macosx-packaging, linux-snap-packaging, linux-debian-packaging, linux-rpm-packaging, linux-installer, sources ]
 
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
+    - uses: actions/download-artifact@v4
+      with:
+        name: Linux-Installer-Build
+    - uses: actions/download-artifact@v4
+      with:
+        name: RPM-Build
+    - uses: actions/download-artifact@v4
+      with:
+        name: Debian-Build
+    - uses: actions/download-artifact@v4
+      with:
+        name: Snap-Build
+    - uses: actions/download-artifact@v4
+      with:
+        name: Linux-AppImage-Build
+    - uses: actions/download-artifact@v4
+      with:
+        pattern: MacOSX-Build-*
+        merge-multiple: true
+    - uses: actions/download-artifact@v4
+      with:
+        pattern: Windows-Build-*
+        merge-multiple: true
+    - uses: actions/download-artifact@v4
+      with:
+        name: Sources
+    - name: Generate and upload sha256 file
+      id: upload-sha256-asset
+      run: |
+        # Clean up not published files from Debian-Build
+        rm -f *.buildinfo *.changes
+        sha256sum *$VERSION* > glpi-agent-$VERSION.sha256
+        gh release upload ${{ needs.setup-release.outputs.tag_name }} glpi-agent-$VERSION.sha256
+      shell: bash
+      env:
+        VERSION: ${{ needs.setup-release.outputs.version }}
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     - name: Publish release
       id: publish-release
       run: |
@@ -621,37 +850,47 @@ jobs:
 
     #if: ${{ needs.setup-release.outputs.create-release == 'no' && needs.setup-release.outputs.build == 'yes' }}
     if: ${{ needs.setup-release.outputs.create-release == 'no' && needs.setup-release.outputs.build == 'yes' && startsWith(needs.setup-release.outputs.tag_name, 'nightly') }}
-    needs: [ setup-release, windows-packaging, macosx-packaging, linux-snap-packaging, linux-debian-packaging, linux-rpm-packaging, linux-installer ]
+    needs: [ setup-release, windows-packaging, macosx-packaging, linux-snap-packaging, linux-debian-packaging, linux-rpm-packaging, linux-installer, sources ]
 
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
       with:
         repository: ${{ github.repository_owner }}/glpi-project.github.io
         token: ${{ secrets.PUBLISHING_TOKEN }}
         fetch-depth: 0
-    - uses: actions/download-artifact@v2
+    - uses: actions/download-artifact@v4
       with:
         name: Linux-Installer-Build
         path: glpi-agent
-    - uses: actions/download-artifact@v2
+    - uses: actions/download-artifact@v4
       with:
         name: RPM-Build
         path: glpi-agent
-    - uses: actions/download-artifact@v2
+    - uses: actions/download-artifact@v4
       with:
         name: Debian-Build
         path: glpi-agent
-    - uses: actions/download-artifact@v2
+    - uses: actions/download-artifact@v4
       with:
         name: Snap-Build
         path: glpi-agent
-    - uses: actions/download-artifact@v2
+    - uses: actions/download-artifact@v4
       with:
-        name: MacOSX-Build
+        name: Linux-AppImage-Build
         path: glpi-agent
-    - uses: actions/download-artifact@v2
+    - uses: actions/download-artifact@v4
       with:
-        name: Windows-Build
+        pattern: MacOSX-Build-*
+        path: glpi-agent
+        merge-multiple: true
+    - uses: actions/download-artifact@v4
+      with:
+        pattern: Windows-Build-*
+        path: glpi-agent
+        merge-multiple: true
+    - uses: actions/download-artifact@v4
+      with:
+        name: Sources
         path: glpi-agent
     - name: Cleanup nightly
       run: |
