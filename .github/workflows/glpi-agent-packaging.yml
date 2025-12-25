@@ -159,18 +159,18 @@ jobs:
       run: |
         tools/github-release-description.sh --version ${{ steps.set-version.outputs.version }} --tag ${{ steps.set-version.outputs.tag_name }}
       shell: bash
-    - name: Create Tagged Release
-      id: create-tagged-release
-      uses: ncipollo/release-action@v1
-      if: ${{ steps.set-version.outputs.create-release == 'yes' }}
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # This token is provided by Actions, you do not need to create your own token
-      with:
-        tag: ${{ steps.set-version.outputs.tag_name }}
-        name: GLPI Agent ${{ steps.set-version.outputs.revname }}
-        bodyFile: release-description.md
-        draft: true
-        prerelease: ${{ steps.set-version.outputs.prerelease }}
+    #- name: Create Tagged Release
+    #  id: create-tagged-release
+    #  uses: ncipollo/release-action@v1
+    #  if: ${{ steps.set-version.outputs.create-release == 'yes' }}
+    #  env:
+    #    GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # This token is provided by Actions, you do not need to create your own token
+    #  with:
+    #    tag: ${{ steps.set-version.outputs.tag_name }}
+    #    name: GLPI Agent ${{ steps.set-version.outputs.revname }}
+    #    bodyFile: release-description.md
+    #    draft: true
+    #    prerelease: ${{ steps.set-version.outputs.prerelease }}
 
   windows-packaging:
 
